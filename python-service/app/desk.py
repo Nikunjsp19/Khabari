@@ -135,18 +135,37 @@ DESK_HTML = """<!DOCTYPE html>
         <div class="meta">Invest $${d.investment} · Confidence ${d.confidence}% · Risk ${d.risk} · Status: ${d.status || 'pending'}</div>
         <ul>${reasons}</ul>
         ${done ? '' : `
+        ${d.action !== 'HOLD' ? `
+        <label class="meta" for="fill-price">Fill price (edit if you filled a few cents off)</label>
+        <input id="fill-price" type="number" step="0.01" min="0.01" style="width:100%;max-width:12rem;margin:0.5rem 0 0.75rem;padding:0.5rem;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);" />
+        ` : ''}
         <div class="row">
           <button class="btn-yes" onclick="confirmTrade('${d.id}')">I did this trade</button>
           <button class="btn-no" onclick="skipTrade('${d.id}')">Skip / ignore</button>
         </div>`}
         <div class="status" id="status"></div>
       `;
+      if (!done && d.action !== 'HOLD') {
+        fetch('/indicators/' + encodeURIComponent(d.ticker)).then(async (pr) => {
+          const input = document.getElementById('fill-price');
+          if (!input || !pr.ok) return;
+          const ind = await pr.json();
+          if (ind.price) input.value = ind.price;
+        }).catch(() => {});
+      }
     }
 
     async function confirmTrade(recId) {
       const status = document.getElementById('status');
       status.textContent = 'Updating portfolio…';
-      const r = await fetch(`/trades/${recId}/execute`, { method: 'POST' });
+      const input = document.getElementById('fill-price');
+      const payload = {};
+      if (input && input.value) payload.fill_price = Number(input.value);
+      const r = await fetch(`/trades/${recId}/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
       const d = await r.json();
       status.textContent = r.ok ? d.message : (d.detail || JSON.stringify(d));
       await loadPortfolio();

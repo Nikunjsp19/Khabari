@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, File, HTTPException, Query, UploadFile
+from fastapi import Body, FastAPI, File, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
@@ -194,9 +194,14 @@ def recommendations_one(rec_id: str) -> dict[str, Any]:
 
 
 @app.post("/trades/{rec_id}/execute")
-def trades_execute(rec_id: str) -> dict[str, Any]:
+def trades_execute(
+    rec_id: str,
+    body: dict[str, Any] = Body(default_factory=dict),
+) -> dict[str, Any]:
+    fill = body.get("fill_price", body.get("fillPrice"))
+    fill_price = float(fill) if fill is not None and fill != "" else None
     try:
-        return execute_recommendation(rec_id)
+        return execute_recommendation(rec_id, fill_price=fill_price)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
