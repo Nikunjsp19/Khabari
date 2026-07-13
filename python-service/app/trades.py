@@ -176,6 +176,169 @@ def execute_recommendation(
     }
 
 
+def _reverse_trade(
+    cash: float,
+    positions: dict[str, Any],
+    trade: dict[str, Any],
+) -> tuple[float, dict[str, Any]]:
+    action = str(trade.get("action", "")).upper()
+    ticker = str(trade.get("ticker", "")).upper()
+    shares = float(trade.get("shares") or 0)
+    dollars = float(trade.get("dollars") or 0)
+    price = float(trade.get("price") or 0)
+    next_positions = {k: dict(v) for k, v in (positions or {}).items()}
+
+    if not ticker or shares <= 0 or dollars <= 0:
+        raise ValueError("Cannot update: previous trade details are incomplete")
+
+    if action == "BUY":
+        cash = round(cash + dollars, 2)
+        existing = next_positions.get(ticker)
+        if not existing:
+            raise ValueError(f"Cannot reverse BUY {ticker}: position not found")
+        owned = float(existing.get("shares", 0))
+        avg = float(existing.get("avg_cost", 0))
+        remaining = owned - shares
+        if remaining < -1e-6:
+            raise ValueError(f"Cannot reverse BUY {ticker}: only {owned} shares on books")
+        if remaining < 1e-8:
+            next_positions.pop(ticker, None)
+        else:
+            basis = owned * avg - dollars
+            next_positions[ticker] = {
+                "shares": round(remaining, 6),
+                "avg_cost": round(basis / remaining, 4),
+            }
+    elif action == "SELL":
+        cash = round(cash - dollars, 2)
+        if cash < -0.01:
+            raise ValueError(f"Cannot reverse SELL {ticker}: not enough cash to undo proceeds")
+        existing = next_positions.get(ticker) or {"shares": 0.0, "avg_cost": price}
+        owned = float(existing.get("shares", 0))
+        avg = float(existing.get("avg_cost") or price)
+        next_positions[ticker] = {
+            "shares": round(owned + shares, 6),
+            "avg_cost": avg if owned > 0 else round(price or avg, 4),
+        }
+    else:
+        raise ValueError(f"Unsupported previous trade action: {action}")
+
+    return cash, next_positions
+
+
+def update_recommendation_trade(
+    rec_id: str,
+    *,
+    fill_price: float,
+    shares: float,
+) -> dict[str, Any]:
+    """Correct an already-executed trade (wrong price/qty)."""
+    rec = get_recommendation(rec_id)
+    if not rec:
+        raise ValueError("Recommendation not found")
+    if rec.get("status") != "executed":
+        raise ValueError("Only executed trades can be updated — confirm the trade first")
+
+    prev = rec.get("trade") or {}
+    if not prev or str(prev.get("action", "")).upper() == "HOLD" or prev.get("note") == "no position change":
+        raise ValueError("Nothing to update — this recommendation had no position change")
+
+    if fill_price <= 0:
+        raise ValueError("Enter a valid fill price greater than 0")
+    if shares <= 0:
+        raise ValueError("Enter a valid quantity greater than 0")
+
+    action = str(rec.get("action") or prev.get("action") or "HOLD").upper()
+    ticker = str(rec.get("ticker") or prev.get("ticker") or "").upper()
+    if action not in {"BUY", "SELL"}:
+        raise ValueError("Only BUY/SELL trades can be updated")
+
+    portfolio = get_latest_portfolio()
+    cash, positions = _reverse_trade(
+        float(portfolio["cash"]),
+        dict(portfolio.get("positions") or {}),
+        prev,
+    )
+
+    # Re-apply with corrected fill via temporary reset of status is awkward;
+    # inline BUY/SELL with shares_override using reversed portfolio.
+    price = float(fill_price)
+    trade: dict[str, Any] = {
+        "recommendation_id": rec_id,
+        "action": action,
+        "ticker": ticker,
+        "ts": _now().isoformat(),
+        "corrected": True,
+        "previous_trade": {
+            "shares": prev.get("shares"),
+            "price": prev.get("price"),
+            "dollars": prev.get("dollars"),
+        },
+    }
+
+    if action == "BUY":
+        spend = round(shares * price, 2)
+        if spend < 1:
+            raise ValueError("Trade amount must be at least $1")
+        if spend > cash + 0.01:
+            raise ValueError(f"Not enough cash: need ${spend:.2f}, have ${cash:.2f}")
+        existing = positions.get(ticker) or {"shares": 0.0, "avg_cost": 0.0}
+        old_shares = float(existing.get("shares", 0))
+        old_cost = float(existing.get("avg_cost", 0))
+        new_shares = old_shares + shares
+        new_avg = ((old_shares * old_cost) + spend) / new_shares if new_shares else price
+        positions[ticker] = {"shares": round(new_shares, 6), "avg_cost": round(new_avg, 4)}
+        cash = round(cash - spend, 2)
+        trade.update({"shares": round(shares, 6), "price": price, "dollars": spend})
+    else:
+        existing = positions.get(ticker)
+        if not existing or float(existing.get("shares", 0)) <= 0:
+            raise ValueError(f"No shares of {ticker} to sell")
+        owned = float(existing["shares"])
+        shares_to_sell = min(owned, float(shares))
+        proceeds = round(shares_to_sell * price, 2)
+        remaining = owned - shares_to_sell
+        if remaining < 1e-8:
+            positions.pop(ticker, None)
+        else:
+            positions[ticker] = {
+                "shares": round(remaining, 6),
+                "avg_cost": float(existing.get("avg_cost", price)),
+            }
+        cash = round(cash + proceeds, 2)
+        trade.update({"shares": round(shares_to_sell, 6), "price": price, "dollars": proceeds})
+
+    save_portfolio(cash, positions, source="trade_correct")
+    get_db().trades.insert_one({**trade, "saved_at": _now()})
+    get_db().recommendations.update_one(
+        {"_id": ObjectId(rec_id)},
+        {
+            "$set": {
+                "trade": trade,
+                "fill_price": price,
+                "corrected_at": _now(),
+            },
+            "$push": {
+                "trade_history": {
+                    "action": prev.get("action"),
+                    "ticker": prev.get("ticker"),
+                    "shares": prev.get("shares"),
+                    "price": prev.get("price"),
+                    "dollars": prev.get("dollars"),
+                    "replaced_at": _now(),
+                }
+            },
+        },
+    )
+
+    return {
+        "ok": True,
+        "trade": trade,
+        "portfolio": {"cash": cash, "positions": positions},
+        "message": f"Updated {action} {ticker}: {shares} shares @ ${price} — portfolio corrected",
+    }
+
+
 def skip_recommendation(rec_id: str, reason: str = "user_skipped") -> dict[str, Any]:
     rec = get_recommendation(rec_id)
     if not rec:

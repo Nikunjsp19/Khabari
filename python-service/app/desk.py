@@ -129,37 +129,54 @@ DESK_HTML = """<!DOCTYPE html>
       }
       const d = await r.json();
       const reasons = (d.reasoning || []).map(x => `<li>${x}</li>`).join('');
-      const done = d.status === 'executed' || d.status === 'skipped';
+      const executed = d.status === 'executed';
+      const skipped = d.status === 'skipped';
+      const canFix = executed && d.action !== 'HOLD' && d.trade && d.trade.shares > 0;
+      const recorded = canFix
+        ? `<div class="meta">Recorded: ${d.trade.shares} shares @ $${d.trade.price}${d.trade.dollars != null ? ` ($${d.trade.dollars})` : ''}</div>`
+        : '';
       card.innerHTML = `
         <div class="action ${d.action}">${d.action} ${d.ticker}</div>
         <div class="meta">Invest $${d.investment} · Confidence ${d.confidence}% · Risk ${d.risk} · Status: ${d.status || 'pending'}</div>
+        ${recorded}
         <ul>${reasons}</ul>
-        ${done ? '' : `
-        ${d.action !== 'HOLD' ? `
+        ${skipped ? '' : `
+        ${(!executed || canFix) && d.action !== 'HOLD' ? `
         <label class="meta" for="fill-price">Fill price (per share)</label>
         <input id="fill-price" type="number" step="0.01" min="0.01" style="width:100%;max-width:12rem;margin:0.5rem 0 0.75rem;padding:0.5rem;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);" />
         <label class="meta" for="fill-shares">Quantity (shares)</label>
         <input id="fill-shares" type="number" step="0.000001" min="0.000001" style="width:100%;max-width:12rem;margin:0.5rem 0 0.75rem;padding:0.5rem;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);" />
         ` : ''}
+        ${!executed ? `
         <div class="row">
           <button class="btn-yes" onclick="confirmTrade('${d.id}')">I did this trade</button>
           <button class="btn-no" onclick="skipTrade('${d.id}')">Skip / ignore</button>
-        </div>`}
+        </div>` : canFix ? `
+        <div class="row">
+          <button class="btn-yes" onclick="updateTrade('${d.id}')">Save correction</button>
+        </div>
+        <div class="meta">Use Save correction if price/qty was wrong.</div>` : ''}
+        `}
         <div class="status" id="status"></div>
       `;
-      if (!done && d.action !== 'HOLD') {
-        fetch('/indicators/' + encodeURIComponent(d.ticker)).then(async (pr) => {
-          const priceInput = document.getElementById('fill-price');
-          const sharesInput = document.getElementById('fill-shares');
-          if (!priceInput || !pr.ok) return;
-          const ind = await pr.json();
-          if (ind.price) {
-            priceInput.value = ind.price;
-            if (sharesInput && d.investment && Number(ind.price) > 0) {
-              sharesInput.value = (Math.round((d.investment / ind.price) * 1e6) / 1e6);
+      if (!skipped && d.action !== 'HOLD') {
+        const priceInput = document.getElementById('fill-price');
+        const sharesInput = document.getElementById('fill-shares');
+        if (executed && d.trade) {
+          if (priceInput && d.trade.price) priceInput.value = d.trade.price;
+          if (sharesInput && d.trade.shares) sharesInput.value = d.trade.shares;
+        } else {
+          fetch('/indicators/' + encodeURIComponent(d.ticker)).then(async (pr) => {
+            if (!priceInput || !pr.ok) return;
+            const ind = await pr.json();
+            if (ind.price) {
+              priceInput.value = ind.price;
+              if (sharesInput && d.investment && Number(ind.price) > 0) {
+                sharesInput.value = (Math.round((d.investment / ind.price) * 1e6) / 1e6);
+              }
             }
-          }
-        }).catch(() => {});
+          }).catch(() => {});
+        }
       }
     }
 
@@ -175,6 +192,29 @@ DESK_HTML = """<!DOCTYPE html>
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload),
+      });
+      const d = await r.json();
+      status.textContent = r.ok ? d.message : (d.detail || JSON.stringify(d));
+      await loadPortfolio();
+      await loadRec();
+    }
+
+    async function updateTrade(recId) {
+      const status = document.getElementById('status');
+      const priceInput = document.getElementById('fill-price');
+      const sharesInput = document.getElementById('fill-shares');
+      if (!priceInput?.value || !sharesInput?.value) {
+        status.textContent = 'Fill price and quantity are required to correct';
+        return;
+      }
+      status.textContent = 'Correcting recorded trade…';
+      const r = await fetch(`/trades/${recId}/update`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fill_price: Number(priceInput.value),
+          shares: Number(sharesInput.value),
+        }),
       });
       const d = await r.json();
       status.textContent = r.ok ? d.message : (d.detail || JSON.stringify(d));

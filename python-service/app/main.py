@@ -57,6 +57,7 @@ from app.trades import (
     get_recommendation,
     portfolio_with_marks,
     skip_recommendation,
+    update_recommendation_trade,
 )
 
 logging.basicConfig(
@@ -239,6 +240,29 @@ def trades_execute(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("trade execute failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/trades/{rec_id}/update")
+def trades_update(
+    rec_id: str,
+    body: dict[str, Any] = Body(default_factory=dict),
+) -> dict[str, Any]:
+    """Correct an already-executed trade (wrong fill price or quantity)."""
+    fill = body.get("fill_price", body.get("fillPrice"))
+    shares_raw = body.get("shares", body.get("quantity", body.get("fill_shares", body.get("fillShares"))))
+    if fill is None or fill == "" or shares_raw is None or shares_raw == "":
+        raise HTTPException(status_code=400, detail="fill_price and shares are required")
+    try:
+        return update_recommendation_trade(
+            rec_id,
+            fill_price=float(fill),
+            shares=float(shares_raw),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("trade update failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
