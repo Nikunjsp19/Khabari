@@ -1,0 +1,80 @@
+services:
+  python-api:
+    build:
+      context: ./python-service
+      dockerfile: Dockerfile
+    container_name: khabari-python-api
+    restart: unless-stopped
+    ports:
+      - "${PYTHON_API_PORT:-8000}:8000"
+    environment:
+      PYTHONUNBUFFERED: "1"
+      MONGODB_URI: ${MONGODB_URI}
+      MONGODB_DB: ${MONGODB_DB:-Khabari}
+      WATCHLIST: ${WATCHLIST:-TSLA,NVDA,AAPL,MSFT,AMZN}
+      INITIAL_CASH: ${INITIAL_CASH:-1000}
+      LLM_PROVIDER: ${LLM_PROVIDER:-gemini}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GEMINI_MODEL: ${GEMINI_MODEL:-gemini-flash-latest}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o-mini}
+      MARKET_TIMEZONE: ${MARKET_TIMEZONE:-America/New_York}
+      MARKET_START_HOUR: ${MARKET_START_HOUR:-9}
+      MARKET_END_HOUR: ${MARKET_END_HOUR:-16}
+      SCHEDULER_ENABLED: ${SCHEDULER_ENABLED:-true}
+      NEWS_SCAN_MINUTES: ${NEWS_SCAN_MINUTES:-30}
+      POSITION_MONITOR_MINUTES: ${POSITION_MONITOR_MINUTES:-60}
+      ANALYZE_COOLDOWN_MINUTES: ${ANALYZE_COOLDOWN_MINUTES:-45}
+      BACKUP_ANALYZE_HOURS: ${BACKUP_ANALYZE_HOURS:-2}
+      MAX_ANALYZES_PER_DAY: ${MAX_ANALYZES_PER_DAY:-8}
+      MAX_LLM_CALLS_PER_DAY: ${MAX_LLM_CALLS_PER_DAY:-30}
+      QUOTA_PAUSE_MINUTES: ${QUOTA_PAUSE_MINUTES:-90}
+      NEWS_MIN_NEW_ARTICLES: ${NEWS_MIN_NEW_ARTICLES:-2}
+      MIN_NOTIFY_CONFIDENCE: ${MIN_NOTIFY_CONFIDENCE:-70}
+      NOTIFY_ONLY_ACTIONABLE: ${NOTIFY_ONLY_ACTIONABLE:-true}
+      POSITION_TAKE_PROFIT_PCT: ${POSITION_TAKE_PROFIT_PCT:-4}
+      POSITION_STOP_LOSS_PCT: ${POSITION_STOP_LOSS_PCT:-3}
+      ANALYZE_PERIOD: ${ANALYZE_PERIOD:-5d}
+      ANALYZE_INTERVAL: ${ANALYZE_INTERVAL:-15m}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:8000}
+      HISAAB_BASE_URL: ${HISAAB_BASE_URL:-}
+      NTFY_TOPIC: ${NTFY_TOPIC:-}
+      NTFY_SERVER: ${NTFY_SERVER:-https://ntfy.sh}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID:-}
+      ALPHA_VANTAGE_API_KEY: ${ALPHA_VANTAGE_API_KEY:-}
+      FINNHUB_API_KEY: ${FINNHUB_API_KEY:-}
+      MARKETAUX_API_TOKEN: ${MARKETAUX_API_TOKEN:-}
+      NEWSDATA_API_KEY: ${NEWSDATA_API_KEY:-}
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: khabari-n8n
+    restart: unless-stopped
+    depends_on:
+      python-api:
+        condition: service_healthy
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    environment:
+      N8N_BASIC_AUTH_ACTIVE: "true"
+      N8N_BASIC_AUTH_USER: ${N8N_BASIC_AUTH_USER:-admin}
+      N8N_BASIC_AUTH_PASSWORD: ${N8N_BASIC_AUTH_PASSWORD:-changeme_n8n_password}
+      N8N_HOST: ${N8N_HOST:-localhost}
+      N8N_PORT: 5678
+      N8N_PROTOCOL: ${N8N_PROTOCOL:-http}
+      WEBHOOK_URL: ${WEBHOOK_URL:-http://localhost:5678/}
+      GENERIC_TIMEZONE: America/New_York
+      TZ: America/New_York
+      PYTHON_API_URL: http://python-api:8000
+    volumes:
+      - n8n_data:/home/node/.n8n
+
+volumes:
+  n8n_data:

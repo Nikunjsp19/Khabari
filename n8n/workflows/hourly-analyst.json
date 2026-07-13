@@ -1,0 +1,54 @@
+{
+  "name": "Khabari Hourly AI Stock Analyst",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9-16 * * 1-5"
+            }
+          ]
+        }
+      },
+      "id": "cron-market-hours",
+      "name": "Cron Mon-Fri 9-4 ET",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [0, 300],
+      "notes": "America/New_York timezone set on n8n container. Runs at :00 each hour 9am–4pm, Mon–Fri."
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://python-api:8000/analyze",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "{\n  \"send_telegram\": true\n}",
+        "options": {
+          "timeout": 180000
+        }
+      },
+      "id": "http-analyze",
+      "name": "Run Analyze",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [280, 300],
+      "notes": "Python service also has its own scheduler; this n8n trigger is optional backup."
+    }
+  ],
+  "connections": {
+    "Cron Mon-Fri 9-4 ET": {
+      "main": [[{ "node": "Run Analyze", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "timezone": "America/New_York"
+  },
+  "meta": {
+    "templateCredsSetupCompleted": false,
+    "description": "Mon–Fri 9am–4pm ET hourly analyze via Python API."
+  }
+}

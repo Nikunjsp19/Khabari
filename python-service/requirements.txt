@@ -1,0 +1,17 @@
+fastapi>=0.115.0,<0.116
+uvicorn[standard]>=0.34.0,<0.35
+yfinance>=0.2.40
+pandas>=2.3.2
+pandas-ta>=0.4.67b0
+numpy>=2.2.6
+pydantic>=2.10.0,<2.11
+pydantic-settings>=2.7.0,<2.8
+httpx>=0.28.0,<0.29
+python-multipart>=0.0.20
+openpyxl>=3.1.5
+pymongo>=4.10.0
+dnspython>=2.6.1
+python-dotenv>=1.0.1
+apscheduler>=3.10.4
+tzdata>=2024.1
+pytest>=8.3.0

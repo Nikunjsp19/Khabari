@@ -1,0 +1,47 @@
+# Environment & secrets
+.env
+.env.local
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+dist/
+build/
+
+# n8n
+n8n/data/
+n8n/.n8n/
+
+# Data / uploads
+data/portfolio.xlsx
+data/uploads/
+*.xlsx
+!data/portfolio.example.csv
+
+# IDE / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Docker volumes (local)
+pgdata/
+
+# Logs
+*.log
+logs/
