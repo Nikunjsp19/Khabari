@@ -62,7 +62,6 @@ def _chat_gemini(system: str, user: str, *, temperature: float) -> str:
         "x-goog-api-key": settings.gemini_api_key,
     }
 
-    last_err = ""
     with httpx.Client(timeout=90.0) as client:
         for attempt in range(1, 4):
             resp = client.post(url, headers=headers, json=payload)
@@ -85,7 +84,16 @@ def _chat_gemini(system: str, user: str, *, temperature: float) -> str:
         else:
             raise LLMError(last_err or "Gemini request failed")
 
-    record_llm_call()
+    usage = data.get("usageMetadata") or {}
+    record_llm_call(
+        input_tokens=int(usage.get("promptTokenCount") or 0),
+        output_tokens=int(
+            usage.get("candidatesTokenCount")
+            or usage.get("outputTokenCount")
+            or 0
+        ),
+        model=model,
+    )
 
     try:
         parts = data["candidates"][0]["content"]["parts"]

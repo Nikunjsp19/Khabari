@@ -172,6 +172,21 @@ def schedule() -> dict[str, Any]:
     return scheduler_status()
 
 
+@app.get("/budget")
+def budget() -> dict[str, Any]:
+    from app.budget import budget_status
+
+    return budget_status()
+
+
+@app.post("/budget/clear-pause")
+def budget_clear_pause() -> dict[str, Any]:
+    """Clear temporary API pause after enabling paid billing / Tier 1."""
+    from app.budget import clear_quota_pause
+
+    return clear_quota_pause()
+
+
 @app.get("/portfolio/marked")
 def portfolio_marked() -> dict[str, Any]:
     return serialize_mongo(portfolio_with_marks())
