@@ -10,8 +10,8 @@ def apply_risk_rules(
     portfolio: dict[str, Any],
     prices: dict[str, float] | None = None,
     *,
-    max_position_pct: float = 0.30,
-    min_cash_pct: float = 0.10,
+    max_position_pct: float = 0.40,
+    min_cash_pct: float = 0.05,
 ) -> dict[str, Any]:
     """
     Enforce portfolio constraints on an AI recommendation.
@@ -20,7 +20,8 @@ def apply_risk_rules(
     - Force time_horizon to SHORT (short-term mandate)
     - Max single-position exposure: max_position_pct of total portfolio value
     - Keep at least min_cash_pct of cash after BUY
-    - Size scales with confidence (0–100)
+    - Size scales with confidence, with a moderate floor so mid-confidence
+      trades still get meaningful size (not half-sized into irrelevance)
     - SELL with zero shares → HOLD
     - Tiny BUY amounts (< $1) → HOLD
     """
@@ -45,7 +46,8 @@ def apply_risk_rules(
     ticker = str(rec.get("ticker", "")).upper()
     amt = float(rec.get("investment", 0) or 0)
     conf = float(rec.get("confidence", 0) or 0)
-    conf_factor = max(0.0, min(conf / 100.0, 1.0))
+    # Moderate aggression: 50 conf → ~0.775 size factor, 100 → 1.0
+    conf_factor = 0.55 + 0.45 * max(0.0, min(conf / 100.0, 1.0))
 
     adjusted = False
     notes: list[str] = []

@@ -136,8 +136,10 @@ DESK_HTML = """<!DOCTYPE html>
         <ul>${reasons}</ul>
         ${done ? '' : `
         ${d.action !== 'HOLD' ? `
-        <label class="meta" for="fill-price">Fill price (edit if you filled a few cents off)</label>
+        <label class="meta" for="fill-price">Fill price (per share)</label>
         <input id="fill-price" type="number" step="0.01" min="0.01" style="width:100%;max-width:12rem;margin:0.5rem 0 0.75rem;padding:0.5rem;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);" />
+        <label class="meta" for="fill-shares">Quantity (shares)</label>
+        <input id="fill-shares" type="number" step="0.000001" min="0.000001" style="width:100%;max-width:12rem;margin:0.5rem 0 0.75rem;padding:0.5rem;border-radius:8px;border:1px solid var(--border);background:var(--bg);color:var(--text);" />
         ` : ''}
         <div class="row">
           <button class="btn-yes" onclick="confirmTrade('${d.id}')">I did this trade</button>
@@ -147,10 +149,16 @@ DESK_HTML = """<!DOCTYPE html>
       `;
       if (!done && d.action !== 'HOLD') {
         fetch('/indicators/' + encodeURIComponent(d.ticker)).then(async (pr) => {
-          const input = document.getElementById('fill-price');
-          if (!input || !pr.ok) return;
+          const priceInput = document.getElementById('fill-price');
+          const sharesInput = document.getElementById('fill-shares');
+          if (!priceInput || !pr.ok) return;
           const ind = await pr.json();
-          if (ind.price) input.value = ind.price;
+          if (ind.price) {
+            priceInput.value = ind.price;
+            if (sharesInput && d.investment && Number(ind.price) > 0) {
+              sharesInput.value = (Math.round((d.investment / ind.price) * 1e6) / 1e6);
+            }
+          }
         }).catch(() => {});
       }
     }
@@ -158,9 +166,11 @@ DESK_HTML = """<!DOCTYPE html>
     async function confirmTrade(recId) {
       const status = document.getElementById('status');
       status.textContent = 'Updating portfolio…';
-      const input = document.getElementById('fill-price');
+      const priceInput = document.getElementById('fill-price');
+      const sharesInput = document.getElementById('fill-shares');
       const payload = {};
-      if (input && input.value) payload.fill_price = Number(input.value);
+      if (priceInput && priceInput.value) payload.fill_price = Number(priceInput.value);
+      if (sharesInput && sharesInput.value) payload.shares = Number(sharesInput.value);
       const r = await fetch(`/trades/${recId}/execute`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },

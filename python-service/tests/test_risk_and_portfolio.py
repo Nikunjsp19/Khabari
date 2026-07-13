@@ -5,12 +5,12 @@ from app.risk import apply_risk_rules
 import pandas as pd
 
 
-def test_buy_capped_at_30_percent():
+def test_buy_capped_at_40_percent():
     portfolio = {"cash": 1000.0, "positions": {}}
     rec = {
         "ticker": "NVDA",
         "action": "BUY",
-        "investment": 400,
+        "investment": 500,
         "confidence": 100,
         "risk": "MEDIUM",
         "time_horizon": "SHORT",
@@ -19,9 +19,9 @@ def test_buy_capped_at_30_percent():
     }
     out = apply_risk_rules(rec, portfolio, prices={"NVDA": 100})
     assert out["action"] == "BUY"
-    # max_cash_spend=900, max_per_trade=300, conf=1 → allowed=300
-    assert out["investment"] == 300.0
-    assert out["remaining_cash"] == 700.0
+    # max_cash_spend=950, max_per_trade=400, conf_factor=1 → allowed=400
+    assert out["investment"] == 400.0
+    assert out["remaining_cash"] == 600.0
     assert out["risk_adjusted"] is True
 
 
@@ -30,7 +30,7 @@ def test_buy_scaled_by_confidence():
     rec = {
         "ticker": "TSLA",
         "action": "BUY",
-        "investment": 300,
+        "investment": 400,
         "confidence": 50,
         "risk": "LOW",
         "time_horizon": "SHORT",
@@ -38,8 +38,8 @@ def test_buy_scaled_by_confidence():
         "reasoning": [],
     }
     out = apply_risk_rules(rec, portfolio)
-    # allowed = min(900, 300) * 0.5 = 150
-    assert out["investment"] == 150.0
+    # allowed = min(950, 400) * (0.55 + 0.45*0.5) = 400 * 0.775 = 310
+    assert out["investment"] == 310.0
 
 
 def test_sell_with_no_shares_becomes_hold():
@@ -72,7 +72,7 @@ def test_tiny_buy_becomes_hold():
         "reasoning": [],
     }
     out = apply_risk_rules(rec, portfolio)
-    # max_cash=1.8, max_pos=0.6, conf=0.9 → allowed=0.54 → HOLD
+    # max_cash=1.9, max_pos=0.8, conf_factor≈0.955 → allowed≈0.76 → HOLD
     assert out["action"] == "HOLD"
 
 

@@ -38,8 +38,8 @@ class RiskRequest(BaseModel):
     recommendation: dict[str, Any]
     portfolio: PortfolioState
     prices: dict[str, float] = Field(default_factory=dict)
-    max_position_pct: float = 0.30
-    min_cash_pct: float = 0.10
+    max_position_pct: float = 0.40
+    min_cash_pct: float = 0.05
 
 
 class PortfolioRowsRequest(BaseModel):

@@ -28,6 +28,7 @@ _scheduler: BackgroundScheduler | None = None
 _last_run: dict[str, Any] | None = None
 _last_news_scan: dict[str, Any] | None = None
 _last_position_check: dict[str, Any] | None = None
+_last_day_wrap: dict[str, Any] | None = None
 _analyze_lock = threading.Lock()
 
 
@@ -219,6 +220,28 @@ def _position_monitor_job() -> None:
         _last_position_check = {"ok": False, "error": str(exc), "status": status}
 
 
+def _day_wrap_job() -> None:
+    """Mon–Fri after the close: push concluding news + today's suggestions."""
+    global _last_day_wrap
+    try:
+        from app.day_wrap import run_day_wrap
+
+        _last_day_wrap = run_day_wrap(force=False)
+        if _last_day_wrap.get("skipped"):
+            logger.info("Day wrap skipped: %s", _last_day_wrap.get("reason"))
+        else:
+            logger.info(
+                "Day wrap sent day=%s actionable=%s news=%s ok=%s",
+                _last_day_wrap.get("day"),
+                (_last_day_wrap.get("wrap") or {}).get("counts", {}).get("actionable"),
+                (_last_day_wrap.get("wrap") or {}).get("counts", {}).get("top_news"),
+                _last_day_wrap.get("ok"),
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Day wrap failed")
+        _last_day_wrap = {"ok": False, "error": str(exc)}
+
+
 def _cron_minute_expr(every_minutes: int, *, minimum: int = 1) -> str:
     """APScheduler minute field: */N is invalid when N >= 60."""
     every = max(minimum, int(every_minutes))
@@ -286,6 +309,20 @@ def start_scheduler() -> BackgroundScheduler | None:
         id="khabari_position_monitor",
         replace_existing=True,
     )
+
+    if settings.day_wrap_enabled:
+        sched.add_job(
+            _day_wrap_job,
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour=settings.day_wrap_hour,
+                minute=settings.day_wrap_minute,
+                timezone=settings.market_timezone,
+            ),
+            id="khabari_day_wrap",
+            replace_existing=True,
+        )
+
     sched.start()
     # Drop legacy job id from older deployments if it somehow exists
     try:
@@ -296,11 +333,13 @@ def start_scheduler() -> BackgroundScheduler | None:
 
     _scheduler = sched
     logger.info(
-        "Scheduler started (free-tier safe): backup@%s + news/%sm + positions/%sm; "
-        "max %s analyzes / %s LLM calls per day",
+        "Scheduler started (free-tier safe): backup@%s + news/%sm + positions/%sm "
+        "+ day_wrap@%02d:%02d; max %s analyzes / %s LLM calls per day",
         backup_hour_expr,
         settings.news_scan_minutes,
         settings.position_monitor_minutes,
+        settings.day_wrap_hour if settings.day_wrap_enabled else -1,
+        settings.day_wrap_minute if settings.day_wrap_enabled else -1,
         settings.max_analyzes_per_day,
         settings.max_llm_calls_per_day,
     )
@@ -314,6 +353,21 @@ def start_scheduler() -> BackgroundScheduler | None:
             misfire_grace_time=900,
         )
         logger.info("Queued startup catch-up analyze (market is open)")
+
+    # If we start after the wrap time on a weekday, still send today's wrap once
+    if settings.day_wrap_enabled:
+        from app.market_hours import now_market
+
+        now = now_market()
+        wrap_passed = (now.hour, now.minute) >= (settings.day_wrap_hour, settings.day_wrap_minute)
+        if now.weekday() <= 4 and wrap_passed:
+            sched.add_job(
+                _day_wrap_job,
+                id="khabari_day_wrap_catchup",
+                replace_existing=True,
+                misfire_grace_time=3600,
+            )
+            logger.info("Queued day-wrap catch-up (past %02d:%02d ET)", settings.day_wrap_hour, settings.day_wrap_minute)
 
     return sched
 
@@ -350,6 +404,7 @@ def scheduler_status() -> dict[str, Any]:
         "last_run": _last_run,
         "last_news_scan": _last_news_scan,
         "last_position_check": _last_position_check,
+        "last_day_wrap": _last_day_wrap,
         "settings": {
             "news_scan_minutes": settings.news_scan_minutes,
             "position_monitor_minutes": settings.position_monitor_minutes,
@@ -362,6 +417,9 @@ def scheduler_status() -> dict[str, Any]:
             "notify_only_actionable": settings.notify_only_actionable,
             "analyze_period": settings.analyze_period,
             "analyze_interval": settings.analyze_interval,
+            "day_wrap_enabled": settings.day_wrap_enabled,
+            "day_wrap_hour": settings.day_wrap_hour,
+            "day_wrap_minute": settings.day_wrap_minute,
         },
         "budget": budget_status(),
     }

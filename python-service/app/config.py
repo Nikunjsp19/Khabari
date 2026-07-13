@@ -29,19 +29,23 @@ class Settings(BaseSettings):
     # Free/paid guards (keep Gemini under ~$10/month)
     news_scan_minutes: int = 30
     position_monitor_minutes: int = 60
-    analyze_cooldown_minutes: int = 45
+    analyze_cooldown_minutes: int = 25
     backup_analyze_hours: int = 2  # full backup every N hours (not every hour)
     max_analyzes_per_day: int = 8  # ~8×3 = 24 Gemini calls/day
     max_llm_calls_per_day: int = 30
     max_monthly_spend_usd: float = 10.0  # hard stop
     quota_pause_minutes: int = 90
     news_min_new_articles: int = 2  # ignore single trivial headline churn
-    min_notify_confidence: float = 70.0
+    min_notify_confidence: float = 58.0
     notify_only_actionable: bool = True
-    position_take_profit_pct: float = 4.0
-    position_stop_loss_pct: float = 3.0
+    position_take_profit_pct: float = 5.0
+    position_stop_loss_pct: float = 3.5
     analyze_period: str = "5d"
     analyze_interval: str = "15m"
+    # End-of-day wrap (Mon–Fri) — concluding news + suggestions summary
+    day_wrap_enabled: bool = True
+    day_wrap_hour: int = 16
+    day_wrap_minute: int = 15
 
     public_base_url: str = "http://localhost:8000"
     # Phone confirm UI — Hisaab /trades (preferred over local /desk)
@@ -55,8 +59,9 @@ class Settings(BaseSettings):
     finnhub_api_key: str = ""
     marketaux_api_token: str = ""
     newsdata_api_key: str = ""
-    max_position_pct: float = 0.30
-    min_cash_pct: float = 0.10
+    # Moderate aggression: larger single-name room, less idle cash
+    max_position_pct: float = 0.40
+    min_cash_pct: float = 0.05
 
     @property
     def watchlist_symbols(self) -> list[str]:

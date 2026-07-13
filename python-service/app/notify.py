@@ -159,6 +159,46 @@ def notify_spend_cap(
     return results
 
 
+def notify_day_wrap(*, title: str, message: str) -> dict[str, Any]:
+    """Send the end-of-day concluding wrap (suggestions + top news)."""
+    settings = get_settings()
+    results: dict[str, Any] = {"sent": [], "errors": []}
+    desk = _confirm_url()
+
+    if settings.ntfy_topic:
+        try:
+            results["sent"].append(
+                send_ntfy(
+                    title,
+                    message,
+                    click_url=desk,
+                    priority="default",
+                    tags="newspaper,chart_with_upwards_trend",
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ntfy day-wrap failed: %s", exc)
+            results["errors"].append({"channel": "ntfy", "error": str(exc)})
+
+    if settings.telegram_bot_token and settings.telegram_chat_id:
+        try:
+            results["sent"].append(send_telegram(f"*{title}*\n\n{message}"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("telegram day-wrap failed: %s", exc)
+            results["errors"].append({"channel": "telegram", "error": str(exc)})
+
+    results["ok"] = bool(results["sent"])
+    results["message"] = message
+    if not results["sent"] and not results["errors"]:
+        results["errors"].append(
+            {
+                "channel": "none",
+                "error": "No notifier configured (set NTFY_TOPIC or Telegram creds)",
+            }
+        )
+    return results
+
+
 def notify_recommendation(
     rec: dict[str, Any],
     *,

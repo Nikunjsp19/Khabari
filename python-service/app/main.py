@@ -119,6 +119,7 @@ def root() -> dict[str, Any]:
             "PUT /watchlist",
             "GET /health",
             "GET /schedule",
+            "POST /day-wrap",
             "GET /indicators?symbols=TSLA,NVDA",
             "POST /analyze",
             "GET /portfolio",
@@ -172,6 +173,17 @@ def schedule() -> dict[str, Any]:
     return scheduler_status()
 
 
+@app.post("/day-wrap")
+def day_wrap(force: bool = True) -> dict[str, Any]:
+    """
+    Send (or preview-build) the end-of-day wrap: today's suggestions + top news.
+    Defaults to force=true so manual calls can re-send.
+    """
+    from app.day_wrap import run_day_wrap
+
+    return run_day_wrap(force=force)
+
+
 @app.get("/budget")
 def budget() -> dict[str, Any]:
     from app.budget import budget_status
@@ -215,8 +227,14 @@ def trades_execute(
 ) -> dict[str, Any]:
     fill = body.get("fill_price", body.get("fillPrice"))
     fill_price = float(fill) if fill is not None and fill != "" else None
+    shares_raw = body.get("shares", body.get("quantity", body.get("fill_shares", body.get("fillShares"))))
+    shares_override = float(shares_raw) if shares_raw is not None and shares_raw != "" else None
     try:
-        return execute_recommendation(rec_id, fill_price=fill_price)
+        return execute_recommendation(
+            rec_id,
+            fill_price=fill_price,
+            shares_override=shares_override,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001

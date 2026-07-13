@@ -76,7 +76,10 @@ def run_analysis(
 
     context = {
         "portfolio": marked,
-        "mandate": "SHORT-TERM only (hours to a few days). Rank all tickers; pick best or HOLD.",
+        "mandate": (
+            "SHORT-TERM + moderately aggressive growth (hours to a few days). "
+            "Rank all tickers; take best trade if score>=52 else HOLD."
+        ),
         "open_positions_note": (
             "If positions exist, consider SELL/HOLD for them based on short-term P&L and momentum. "
             "Do not ignore current holdings."

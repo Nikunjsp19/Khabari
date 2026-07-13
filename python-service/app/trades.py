@@ -73,6 +73,7 @@ def execute_recommendation(
     *,
     fill_price: float | None = None,
     investment_override: float | None = None,
+    shares_override: float | None = None,
 ) -> dict[str, Any]:
     """
     User confirms they placed the trade. Update cash/positions in MongoDB.
@@ -115,10 +116,19 @@ def execute_recommendation(
         raise ValueError(f"Invalid price for {ticker}")
 
     if action == "BUY":
-        spend = min(amount, cash)
+        if shares_override is not None and shares_override > 0:
+            shares = float(shares_override)
+            spend = round(shares * price, 2)
+        else:
+            spend = min(amount, cash)
+            if spend < 1:
+                raise ValueError("Not enough cash to execute BUY")
+            shares = spend / price
+            spend = round(shares * price, 2)
         if spend < 1:
-            raise ValueError("Not enough cash to execute BUY")
-        shares = spend / price
+            raise ValueError("Trade amount must be at least $1")
+        if spend > cash + 0.01:
+            raise ValueError(f"Not enough cash: need ${spend:.2f}, have ${cash:.2f}")
         existing = positions.get(ticker) or {"shares": 0.0, "avg_cost": 0.0}
         old_shares = float(existing.get("shares", 0))
         old_cost = float(existing.get("avg_cost", 0))
@@ -133,7 +143,12 @@ def execute_recommendation(
         if not existing or float(existing.get("shares", 0)) <= 0:
             raise ValueError(f"No shares of {ticker} to sell")
         owned = float(existing["shares"])
-        shares_to_sell = min(owned, amount / price)
+        if shares_override is not None and shares_override > 0:
+            shares_to_sell = min(owned, float(shares_override))
+        else:
+            shares_to_sell = min(owned, amount / price)
+        if shares_to_sell <= 0:
+            raise ValueError("Enter a valid quantity greater than 0")
         proceeds = round(shares_to_sell * price, 2)
         remaining = owned - shares_to_sell
         if remaining < 1e-8:
