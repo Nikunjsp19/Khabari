@@ -61,7 +61,14 @@ def format_recommendation_message(
     )
 
 
-def send_ntfy(title: str, message: str, *, click_url: str | None = None) -> dict[str, Any]:
+def send_ntfy(
+    title: str,
+    message: str,
+    *,
+    click_url: str | None = None,
+    priority: str = "default",
+    tags: str = "chart_with_upwards_trend,moneybag",
+) -> dict[str, Any]:
     settings = get_settings()
     topic = (settings.ntfy_topic or "").strip()
     if not topic:
@@ -71,8 +78,8 @@ def send_ntfy(title: str, message: str, *, click_url: str | None = None) -> dict
     url = f"{base}/{topic}"
     headers = {
         "Title": title,
-        "Priority": "default",
-        "Tags": "chart_with_upwards_trend,moneybag",
+        "Priority": priority,
+        "Tags": tags,
     }
     if click_url:
         headers["Click"] = click_url
@@ -99,6 +106,57 @@ def send_telegram(text: str) -> dict[str, Any]:
         if resp.status_code >= 400 or not data.get("ok"):
             raise RuntimeError(f"Telegram send failed: {data}")
         return {"ok": True, "channel": "telegram", "response": data}
+
+
+def notify_spend_cap(
+    *,
+    spend_month_usd: float,
+    month_cap_usd: float,
+    kind: str = "reached",
+) -> dict[str, Any]:
+    """Alert when monthly Gemini spend hits (or approaches) the hard cap."""
+    settings = get_settings()
+    if kind == "warning":
+        title = f"Khabari spend warning (${spend_month_usd:.2f}/${month_cap_usd:.2f})"
+        message = (
+            f"Gemini estimated spend this month is ${spend_month_usd:.2f}.\n"
+            f"Hard cap is ${month_cap_usd:.2f}.\n"
+            f"Model: {settings.gemini_model}\n"
+            "Analyzes will stop automatically at the cap."
+        )
+        tags = "warning,money_with_wings"
+        priority = "high"
+    else:
+        title = f"Khabari $10 cap reached (${spend_month_usd:.2f})"
+        message = (
+            f"Monthly Gemini spend cap reached: ${spend_month_usd:.2f} / ${month_cap_usd:.2f}.\n"
+            f"Model: {settings.gemini_model}\n"
+            "All further analyzes are paused until next month "
+            "(or until you raise MAX_MONTHLY_SPEND_USD)."
+        )
+        tags = "no_entry,money_with_wings"
+        priority = "urgent"
+
+    results: dict[str, Any] = {"sent": [], "errors": [], "kind": kind}
+    if settings.ntfy_topic:
+        try:
+            results["sent"].append(
+                send_ntfy(title, message, priority=priority, tags=tags)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ntfy spend-cap alert failed: %s", exc)
+            results["errors"].append({"channel": "ntfy", "error": str(exc)})
+
+    if settings.telegram_bot_token and settings.telegram_chat_id:
+        try:
+            results["sent"].append(send_telegram(f"*{title}*\n\n{message}"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("telegram spend-cap alert failed: %s", exc)
+            results["errors"].append({"channel": "telegram", "error": str(exc)})
+
+    results["ok"] = bool(results["sent"])
+    results["message"] = message
+    return results
 
 
 def notify_recommendation(

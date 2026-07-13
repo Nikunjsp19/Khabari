@@ -85,6 +85,8 @@ def _load() -> dict[str, Any]:
         "paused_until": doc.get("paused_until"),
         "last_quota_error_at": doc.get("last_quota_error_at"),
         "last_quota_error": doc.get("last_quota_error"),
+        "month_cap_alerted_for": doc.get("month_cap_alerted_for"),
+        "month_warn_alerted_for": doc.get("month_warn_alerted_for"),
     }
 
 
@@ -211,9 +213,25 @@ def record_llm_call(
     cost = estimate_cost_usd(model, input_tokens, output_tokens)
 
     state = _load()
+    prev_month = float(state.get("spend_month_usd") or 0)
+    month_cap = float(settings.max_monthly_spend_usd)
+    warn_at = month_cap * 0.8
+
     state["llm_calls"] = int(state.get("llm_calls") or 0) + 1
     state["spend_day_usd"] = round(float(state.get("spend_day_usd") or 0) + cost, 6)
-    state["spend_month_usd"] = round(float(state.get("spend_month_usd") or 0) + cost, 6)
+    state["spend_month_usd"] = round(prev_month + cost, 6)
+    month = state["month"]
+    new_month = float(state["spend_month_usd"])
+
+    # Alert once when crossing 80% and once when hitting the hard cap
+    alert_kind: str | None = None
+    if prev_month < month_cap <= new_month and state.get("month_cap_alerted_for") != month:
+        alert_kind = "reached"
+        state["month_cap_alerted_for"] = month
+    elif prev_month < warn_at <= new_month and state.get("month_warn_alerted_for") != month:
+        alert_kind = "warning"
+        state["month_warn_alerted_for"] = month
+
     _save(state)
     logger.info(
         "LLM call #%s cost≈$%.4f day=$%.4f month=$%.4f/$%.2f model=%s in=%s out=%s",
@@ -226,8 +244,26 @@ def record_llm_call(
         input_tokens,
         output_tokens,
     )
-    return cost
 
+    if alert_kind:
+        try:
+            from app.notify import notify_spend_cap
+
+            notify_spend_cap(
+                spend_month_usd=new_month,
+                month_cap_usd=month_cap,
+                kind=alert_kind,
+            )
+            logger.warning(
+                "Sent monthly spend %s alert: $%.4f / $%.2f",
+                alert_kind,
+                new_month,
+                month_cap,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("Failed to send monthly spend cap alert")
+
+    return cost
 
 def trip_quota_pause(error_text: str = "") -> None:
     """After Gemini 429 / quota errors, pause LLM usage for a while."""

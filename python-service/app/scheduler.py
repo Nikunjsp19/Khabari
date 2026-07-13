@@ -74,6 +74,28 @@ def _maybe_analyze(trigger: str, *, force_cooldown: bool = False) -> dict[str, A
                 "budget": budget_status(),
             }
             logger.info("Skipping analyze (%s) — free-tier budget: %s", trigger, budget_reason)
+            if "monthly_spend_cap" in (budget_reason or ""):
+                try:
+                    from app.notify import notify_spend_cap
+
+                    b = budget_status()
+                    # notify_spend_cap is idempotent via month_cap_alerted_for in record_llm_call;
+                    # still send once from scheduler if somehow missed.
+                    if b.get("month_cap_alerted_for") != b.get("month"):
+                        notify_spend_cap(
+                            spend_month_usd=float(b.get("spend_month_usd") or 0),
+                            month_cap_usd=float(
+                                (b.get("limits") or {}).get("max_monthly_spend_usd") or 10
+                            ),
+                            kind="reached",
+                        )
+                        from app.budget import _load, _save
+
+                        st = _load()
+                        st["month_cap_alerted_for"] = st.get("month")
+                        _save(st)
+                except Exception:  # noqa: BLE001
+                    logger.exception("Failed monthly-cap scheduler alert")
             _last_run = out
             return out
 
