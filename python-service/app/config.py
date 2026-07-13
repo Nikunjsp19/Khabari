@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     # LLM — Gemini is default (use explicit cheap Flash, not flash-latest alias)
     llm_provider: str = "gemini"
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-2.5-flash"
+    gemini_model: str = "gemini-3.5-flash"
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
 
