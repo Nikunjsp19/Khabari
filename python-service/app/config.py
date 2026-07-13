@@ -11,10 +11,12 @@ class Settings(BaseSettings):
     watchlist: str = "TSLA,NVDA,AAPL,MSFT,AMZN"
     initial_cash: float = 1000.0
 
-    # LLM — Gemini is default (use explicit cheap Flash, not flash-latest alias)
+    # LLM — Gemini is default
     llm_provider: str = "gemini"
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.5-flash"
+    # Comma-separated fallbacks used immediately on 503/overload (same analyze run)
+    gemini_fallback_models: str = "gemini-3.1-flash-lite,gemini-flash-latest"
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
 
