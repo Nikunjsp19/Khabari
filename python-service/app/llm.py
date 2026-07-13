@@ -39,6 +39,8 @@ def _chat_gemini(system: str, user: str, *, temperature: float) -> str:
     if not settings.gemini_api_key:
         raise LLMError("GEMINI_API_KEY is not set")
 
+    import time
+
     from app.budget import can_call_llm, looks_like_quota_error, record_llm_call, trip_quota_pause
 
     ok, reason = can_call_llm()
@@ -59,14 +61,29 @@ def _chat_gemini(system: str, user: str, *, temperature: float) -> str:
         "Content-Type": "application/json",
         "x-goog-api-key": settings.gemini_api_key,
     }
+
+    last_err = ""
     with httpx.Client(timeout=90.0) as client:
-        resp = client.post(url, headers=headers, json=payload)
-        if resp.status_code >= 400:
-            err = f"Gemini HTTP {resp.status_code}: {resp.text[:500]}"
-            if resp.status_code == 429 or looks_like_quota_error(err):
-                trip_quota_pause(err)
-            raise LLMError(err)
-        data = resp.json()
+        for attempt in range(1, 4):
+            resp = client.post(url, headers=headers, json=payload)
+            if resp.status_code < 400:
+                data = resp.json()
+                break
+            last_err = f"Gemini HTTP {resp.status_code}: {resp.text[:500]}"
+            # 503 = temporary overload; retry. 429 = real quota — pause.
+            if resp.status_code == 429 or (
+                looks_like_quota_error(last_err) and resp.status_code != 503
+            ):
+                trip_quota_pause(last_err)
+                raise LLMError(last_err)
+            if resp.status_code in {500, 502, 503, 504} and attempt < 3:
+                wait = 8 * attempt
+                logger.warning("Gemini %s on attempt %s; retry in %ss", resp.status_code, attempt, wait)
+                time.sleep(wait)
+                continue
+            raise LLMError(last_err)
+        else:
+            raise LLMError(last_err or "Gemini request failed")
 
     record_llm_call()
 

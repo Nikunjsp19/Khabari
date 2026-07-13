@@ -215,7 +215,12 @@ def start_scheduler() -> BackgroundScheduler | None:
     if _scheduler and _scheduler.running:
         return _scheduler
 
-    sched = BackgroundScheduler(timezone=settings.market_timezone)
+    job_defaults = {
+        "coalesce": True,
+        "max_instances": 1,
+        "misfire_grace_time": 900,  # still run if woken ≤15 min late (Docker sleep)
+    }
+    sched = BackgroundScheduler(timezone=settings.market_timezone, job_defaults=job_defaults)
     hour_window = f"{settings.market_start_hour}-{settings.market_end_hour}"
     backup_every = max(1, int(settings.backup_analyze_hours))
 
@@ -277,7 +282,23 @@ def start_scheduler() -> BackgroundScheduler | None:
         settings.max_analyzes_per_day,
         settings.max_llm_calls_per_day,
     )
+
+    # If we start mid-session (or wake from sleep), don't wait for the next cron tick
+    if is_market_hours():
+        sched.add_job(
+            _backup_job,
+            id="khabari_startup_catchup",
+            replace_existing=True,
+            misfire_grace_time=900,
+        )
+        logger.info("Queued startup catch-up analyze (market is open)")
+
     return sched
+
+
+def trigger_analyze_now(trigger: str = "manual") -> dict[str, Any]:
+    """Run analyze immediately (used by API / ops)."""
+    return _maybe_analyze(trigger, force_cooldown=True)
 
 
 def stop_scheduler() -> None:
