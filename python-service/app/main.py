@@ -13,19 +13,25 @@ from fastapi.responses import HTMLResponse
 
 from app.config import get_settings
 from app.db import (
+    get_active_options_watchlist,
     get_active_watchlist,
+    get_latest_options_portfolio,
+    get_latest_options_recommendation,
     get_latest_portfolio,
     get_latest_recommendation,
     health_status,
     init_db,
+    save_options_portfolio,
     save_portfolio,
     serialize_mongo,
+    set_options_watchlist,
     set_watchlist,
 )
 from app.desk import DESK_HTML
 from app.indicators import compute_indicators, compute_indicators_batch
 from app.llm import LLMError
 from app.market_hours import is_market_hours, market_hours_status
+from app.options_pipeline import run_options_analysis
 from app.pipeline import run_analysis
 from app.portfolio import read_portfolio_file, rows_to_portfolio
 from app.prompts import (
@@ -47,6 +53,8 @@ from app.scheduler import scheduler_status, start_scheduler, stop_scheduler
 from app.schemas import (
     AnalyzeRequest,
     HealthResponse,
+    OptionsAnalyzeRequest,
+    OptionsPortfolioState,
     PortfolioRowsRequest,
     PortfolioState,
     RiskRequest,
@@ -58,6 +66,14 @@ from app.trades import (
     portfolio_with_marks,
     skip_recommendation,
     update_recommendation_trade,
+)
+from app.options_trades import (
+    execute_options_recommendation,
+    get_options_recommendation,
+    get_pending_options_recommendation,
+    options_portfolio_with_marks,
+    skip_options_recommendation,
+    update_options_recommendation_trade,
 )
 
 logging.basicConfig(
@@ -84,8 +100,8 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(
     title="Khabari Stock Analyst API",
-    description="Hourly AI stock analyst — Mon–Fri 9am–4pm ET.",
-    version="0.3.0",
+    description="Hourly AI stock + options analyst — Mon–Fri 9am–4pm ET.",
+    version="0.4.0",
     lifespan=lifespan,
 )
 
@@ -131,9 +147,18 @@ def root() -> dict[str, Any]:
             "GET /recommendations/pending",
             "POST /risk/apply",
             "GET /prompts",
+            "POST /options/analyze",
+            "POST /options/movers/refresh",
+            "GET /options/watchlist",
+            "PUT /options/watchlist",
+            "GET /options/portfolio",
+            "GET /options/portfolio/marked",
+            "GET /options/recommendations/pending",
+            "POST /options/trades/{id}/execute",
         ],
         "mongo": health_status(),
         "desk": f"{settings.public_base_url.rstrip('/')}/desk",
+        "options_desk": f"{settings.public_base_url.rstrip('/')}/desk?tab=options",
     }
 
 
@@ -463,3 +488,192 @@ def build_news_prompt(news_by_ticker: dict[str, list[str]]) -> dict[str, str]:
 @app.post("/prompts/technical")
 def build_tech_prompt(indicators: dict[str, Any]) -> dict[str, str]:
     return {"system": TECH_SYSTEM, "user": tech_user_prompt(indicators)}
+
+
+# ---------------------------------------------------------------------------
+# Options routes (separate paper book)
+# ---------------------------------------------------------------------------
+
+
+@app.get("/options/watchlist")
+def options_watchlist_get() -> dict[str, Any]:
+    return {"tickers": get_active_options_watchlist()}
+
+
+@app.post("/options/movers/refresh")
+def options_movers_refresh() -> dict[str, Any]:
+    """Scan high-movement names and rewrite the options watchlist (no LLM)."""
+    from app.options_movers import refresh_options_watchlist_from_movers
+
+    return refresh_options_watchlist_from_movers(persist=True)
+
+
+@app.put("/options/watchlist")
+def options_watchlist_put(body: dict[str, Any]) -> dict[str, Any]:
+    raw = body.get("tickers", [])
+    if isinstance(raw, str):
+        tickers = [t.strip() for t in raw.split(",") if t.strip()]
+    elif isinstance(raw, list):
+        tickers = raw
+    else:
+        raise HTTPException(status_code=400, detail="Provide tickers as a list or comma-separated string")
+    try:
+        saved = set_options_watchlist(tickers)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"tickers": saved, "message": "Options watchlist updated"}
+
+
+@app.get("/options/portfolio")
+def options_portfolio_latest() -> dict[str, Any]:
+    return serialize_mongo(get_latest_options_portfolio())
+
+
+@app.post("/options/portfolio")
+def options_portfolio_save(body: OptionsPortfolioState) -> dict[str, Any]:
+    positions = {k: v.model_dump() for k, v in body.positions.items()}
+    doc_id = save_options_portfolio(body.cash, positions)
+    return {"id": doc_id, "portfolio": body.model_dump()}
+
+
+@app.get("/options/portfolio/marked")
+def options_portfolio_marked() -> dict[str, Any]:
+    return serialize_mongo(options_portfolio_with_marks())
+
+
+@app.get("/options/recommendations/pending")
+def options_recommendations_pending() -> dict[str, Any]:
+    doc = get_pending_options_recommendation()
+    if not doc:
+        raise HTTPException(status_code=404, detail="No pending options recommendation")
+    return serialize_mongo(doc)
+
+
+@app.get("/options/recommendations/latest")
+def options_recommendations_latest() -> dict[str, Any]:
+    doc = get_latest_options_recommendation()
+    if not doc:
+        raise HTTPException(status_code=404, detail="No options recommendations yet")
+    return serialize_mongo(doc)
+
+
+@app.get("/options/recommendations/{rec_id}")
+def options_recommendations_one(rec_id: str) -> dict[str, Any]:
+    doc = get_options_recommendation(rec_id)
+    if not doc:
+        raise HTTPException(status_code=404, detail="Options recommendation not found")
+    return serialize_mongo(doc)
+
+
+@app.post("/options/trades/{rec_id}/execute")
+def options_trades_execute(
+    rec_id: str,
+    body: dict[str, Any] = Body(default_factory=dict),
+) -> dict[str, Any]:
+    fill = body.get("fill_premium", body.get("fillPremium", body.get("premium")))
+    fill_premium = float(fill) if fill is not None and fill != "" else None
+    contracts_raw = body.get("contracts", body.get("quantity"))
+    contracts_override = (
+        float(contracts_raw) if contracts_raw is not None and contracts_raw != "" else None
+    )
+    try:
+        return execute_options_recommendation(
+            rec_id,
+            fill_premium=fill_premium,
+            contracts_override=contracts_override,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("options trade execute failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/options/trades/{rec_id}/update")
+def options_trades_update(
+    rec_id: str,
+    body: dict[str, Any] = Body(default_factory=dict),
+) -> dict[str, Any]:
+    fill = body.get("fill_premium", body.get("fillPremium", body.get("premium")))
+    contracts_raw = body.get("contracts", body.get("quantity"))
+    if fill is None or fill == "" or contracts_raw is None or contracts_raw == "":
+        raise HTTPException(status_code=400, detail="fill_premium and contracts are required")
+    try:
+        return update_options_recommendation_trade(
+            rec_id,
+            fill_premium=float(fill),
+            contracts=float(contracts_raw),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("options trade update failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@app.post("/options/trades/{rec_id}/skip")
+def options_trades_skip(rec_id: str) -> dict[str, Any]:
+    try:
+        return skip_options_recommendation(rec_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/options/analyze")
+def options_analyze(body: OptionsAnalyzeRequest | None = None) -> dict[str, Any]:
+    """
+    Options pipeline: spot indicators → news → Yahoo/yfinance deep scan →
+    Gemini agents → options risk → notify → MongoDB.
+    """
+    body = body or OptionsAnalyzeRequest()
+    if not body.force and not is_market_hours():
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "outside_market_hours",
+                "message": "Options analysis only runs Mon–Fri 9am–4pm ET. Pass force=true to override.",
+                "market_hours": market_hours_status(),
+            },
+        )
+
+    from app.budget import budget_status, can_start_analyze, record_analyze
+
+    if not body.force:
+        ok, reason = can_start_analyze()
+        if not ok:
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "free_tier_budget",
+                    "message": f"Skipping options analyze to protect free limits: {reason}",
+                    "budget": budget_status(),
+                },
+            )
+
+    symbols = body.symbols  # None → pipeline auto-picks high movers into watchlist
+    portfolio = None
+    if body.portfolio:
+        portfolio = {
+            "cash": body.portfolio.cash,
+            "positions": {k: v.model_dump() for k, v in body.portfolio.positions.items()},
+        }
+    try:
+        result = run_options_analysis(
+            symbols=symbols,
+            portfolio=portfolio,
+            send_notification=body.send_telegram,
+            period=body.period,
+            interval=body.interval,
+            trigger="api" if not body.force else "api_force",
+        )
+        try:
+            record_analyze()
+        except Exception:  # noqa: BLE001
+            logger.warning("Could not record options analyze budget", exc_info=True)
+        result["budget"] = budget_status()
+        return result
+    except LLMError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("options analyze failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

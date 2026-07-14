@@ -59,6 +59,34 @@ class AnalyzeRequest(BaseModel):
     )
 
 
+class OptionPosition(BaseModel):
+    underlying: str
+    right: Literal["call", "put"]
+    strike: float
+    expiry: str
+    contracts: float
+    avg_premium: float
+    osi: str | None = None
+    key: str | None = None
+
+
+class OptionsPortfolioState(BaseModel):
+    cash: float = 1000.0
+    positions: dict[str, OptionPosition] = Field(default_factory=dict)
+
+
+class OptionsAnalyzeRequest(BaseModel):
+    symbols: list[str] | None = None
+    portfolio: OptionsPortfolioState | None = None
+    send_telegram: bool = True
+    period: str | None = None
+    interval: str | None = None
+    force: bool = Field(
+        False,
+        description="If true, run even outside Mon–Fri 9am–4pm ET",
+    )
+
+
 class HealthResponse(BaseModel):
     status: str
     service: str = "khabari-python-api"

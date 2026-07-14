@@ -112,12 +112,15 @@ def budget_status() -> dict[str, Any]:
     settings = get_settings()
     state = _load()
     paused, pause_reason = is_paused(state)
+    day_cap = float(settings.max_daily_spend_usd)
     month_cap = float(settings.max_monthly_spend_usd)
+    call_cap = int(settings.max_llm_calls_per_day)
     return {
         **state,
         "limits": {
             "max_analyzes_per_day": settings.max_analyzes_per_day,
-            "max_llm_calls_per_day": settings.max_llm_calls_per_day,
+            "max_llm_calls_per_day": call_cap,
+            "max_daily_spend_usd": day_cap,
             "max_monthly_spend_usd": month_cap,
             "analyze_cooldown_minutes": settings.analyze_cooldown_minutes,
             "quota_pause_minutes": settings.quota_pause_minutes,
@@ -126,7 +129,10 @@ def budget_status() -> dict[str, Any]:
         "paused": paused,
         "pause_reason": pause_reason,
         "analyzes_remaining": max(0, settings.max_analyzes_per_day - state["analyzes"]),
-        "llm_calls_remaining": max(0, settings.max_llm_calls_per_day - state["llm_calls"]),
+        "llm_calls_remaining": (
+            None if call_cap <= 0 else max(0, call_cap - state["llm_calls"])
+        ),
+        "day_remaining_usd": round(max(0.0, day_cap - state["spend_day_usd"]), 4),
         "month_remaining_usd": round(max(0.0, month_cap - state["spend_month_usd"]), 4),
     }
 
@@ -134,6 +140,10 @@ def budget_status() -> dict[str, Any]:
 def is_paused(state: dict[str, Any] | None = None) -> tuple[bool, str | None]:
     state = state or _load()
     settings = get_settings()
+
+    # Hard daily dollar stop
+    if float(state.get("spend_day_usd") or 0) >= float(settings.max_daily_spend_usd):
+        return True, f"daily_spend_cap_${settings.max_daily_spend_usd:.2f}"
 
     # Hard monthly dollar stop
     if float(state.get("spend_month_usd") or 0) >= float(settings.max_monthly_spend_usd):
@@ -151,7 +161,7 @@ def is_paused(state: dict[str, Any] | None = None) -> tuple[bool, str | None]:
 
 
 def can_start_analyze() -> tuple[bool, str]:
-    """Gate full analyze runs (3 LLM calls each) against daily/monthly caps."""
+    """Gate full analyze runs against daily/monthly $ and analyze caps."""
     settings = get_settings()
     state = _load()
     paused, reason = is_paused(state)
@@ -161,8 +171,14 @@ def can_start_analyze() -> tuple[bool, str]:
     if state["analyzes"] >= settings.max_analyzes_per_day:
         return False, f"daily_analyze_cap_{settings.max_analyzes_per_day}"
 
-    if state["llm_calls"] + 3 > settings.max_llm_calls_per_day:
-        return False, f"daily_llm_cap_{settings.max_llm_calls_per_day}"
+    call_cap = int(settings.max_llm_calls_per_day)
+    if call_cap > 0 and state["llm_calls"] + 3 > call_cap:
+        return False, f"daily_llm_cap_{call_cap}"
+
+    # Leave a little daily headroom (~one small batch)
+    day_left = float(settings.max_daily_spend_usd) - float(state["spend_day_usd"])
+    if day_left <= 0.01:
+        return False, f"daily_spend_cap_${settings.max_daily_spend_usd:.2f}"
 
     # Leave a little monthly headroom (~1 analyze worth)
     month_left = float(settings.max_monthly_spend_usd) - float(state["spend_month_usd"])
@@ -178,8 +194,11 @@ def can_call_llm() -> tuple[bool, str]:
     paused, reason = is_paused(state)
     if paused:
         return False, reason or "paused"
-    if state["llm_calls"] >= settings.max_llm_calls_per_day:
-        return False, f"daily_llm_cap_{settings.max_llm_calls_per_day}"
+    call_cap = int(settings.max_llm_calls_per_day)
+    if call_cap > 0 and state["llm_calls"] >= call_cap:
+        return False, f"daily_llm_cap_{call_cap}"
+    if float(state["spend_day_usd"]) >= float(settings.max_daily_spend_usd):
+        return False, f"daily_spend_cap_${settings.max_daily_spend_usd:.2f}"
     if float(state["spend_month_usd"]) >= float(settings.max_monthly_spend_usd):
         return False, f"monthly_spend_cap_${settings.max_monthly_spend_usd:.2f}"
     return True, "ok"
@@ -189,12 +208,15 @@ def record_analyze() -> None:
     state = _load()
     state["analyzes"] = int(state.get("analyzes") or 0) + 1
     _save(state)
+    settings = get_settings()
     logger.info(
-        "Budget analyzes=%s/%s month_spend=$%.4f/$%.2f",
+        "Budget analyzes=%s/%s day_spend=$%.4f/$%.2f month_spend=$%.4f/$%.2f",
         state["analyzes"],
-        get_settings().max_analyzes_per_day,
+        settings.max_analyzes_per_day,
+        state["spend_day_usd"],
+        settings.max_daily_spend_usd,
         state["spend_month_usd"],
-        get_settings().max_monthly_spend_usd,
+        settings.max_monthly_spend_usd,
     )
 
 
@@ -234,10 +256,11 @@ def record_llm_call(
 
     _save(state)
     logger.info(
-        "LLM call #%s cost≈$%.4f day=$%.4f month=$%.4f/$%.2f model=%s in=%s out=%s",
+        "LLM call #%s cost≈$%.4f day=$%.4f/$%.2f month=$%.4f/$%.2f model=%s in=%s out=%s",
         state["llm_calls"],
         cost,
         state["spend_day_usd"],
+        settings.max_daily_spend_usd,
         state["spend_month_usd"],
         settings.max_monthly_spend_usd,
         model,

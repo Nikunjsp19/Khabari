@@ -29,7 +29,10 @@ _last_run: dict[str, Any] | None = None
 _last_news_scan: dict[str, Any] | None = None
 _last_position_check: dict[str, Any] | None = None
 _last_day_wrap: dict[str, Any] | None = None
+_last_options_run: dict[str, Any] | None = None
+_last_options_position_check: dict[str, Any] | None = None
 _analyze_lock = threading.Lock()
+_options_analyze_lock = threading.Lock()
 
 
 def _record_analyze(result: dict[str, Any], *, trigger: str, status: dict[str, Any]) -> dict[str, Any]:
@@ -165,7 +168,180 @@ def _maybe_analyze(trigger: str, *, force_cooldown: bool = False) -> dict[str, A
 
 def _backup_job() -> None:
     """Sparse backup full scan if news was quiet (still budget-capped)."""
+    _sync_famous_stock_watchlist()
     _maybe_analyze("backup", force_cooldown=True)
+
+
+def _sync_famous_stock_watchlist() -> None:
+    """Keep stock watchlist on the configured famous/liquid universe."""
+    settings = get_settings()
+    if not settings.watchlist_auto_famous:
+        return
+    try:
+        from app.db import set_watchlist
+
+        set_watchlist(settings.watchlist_symbols)
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not sync famous stock watchlist", exc_info=True)
+
+
+def _record_options_analyze(
+    result: dict[str, Any], *, trigger: str, status: dict[str, Any]
+) -> dict[str, Any]:
+    rec = result.get("recommendation", {})
+    return {
+        "skipped": False,
+        "ok": True,
+        "trigger": trigger,
+        "status": status,
+        "asset_class": "options",
+        "recommendation": {
+            "action": rec.get("action"),
+            "ticker": rec.get("ticker"),
+            "right": rec.get("right"),
+            "strike": rec.get("strike"),
+            "expiry": rec.get("expiry"),
+            "contracts": rec.get("contracts"),
+            "investment": rec.get("investment"),
+            "confidence": rec.get("confidence"),
+        },
+        "notify_reason": result.get("notify_reason"),
+        "notification_ok": bool((result.get("notification") or {}).get("ok")),
+        "mongo": result.get("mongo"),
+    }
+
+
+def _maybe_options_analyze(trigger: str, *, force_cooldown: bool = False) -> dict[str, Any]:
+    global _last_options_run
+    settings = get_settings()
+    status = market_hours_status()
+    if not settings.options_scheduler_enabled:
+        out = {"skipped": True, "reason": "options_scheduler_disabled", "trigger": trigger}
+        _last_options_run = out
+        return out
+    if not is_market_hours():
+        out = {
+            "skipped": True,
+            "reason": "outside_market_hours",
+            "status": status,
+            "trigger": trigger,
+        }
+        _last_options_run = out
+        return out
+
+    if not _options_analyze_lock.acquire(blocking=False):
+        out = {
+            "skipped": True,
+            "reason": "options_analyze_in_progress",
+            "status": status,
+            "trigger": trigger,
+        }
+        return out
+
+    try:
+        budget_ok, budget_reason = can_start_analyze()
+        if not budget_ok:
+            out = {
+                "skipped": True,
+                "reason": budget_reason,
+                "status": status,
+                "trigger": trigger,
+                "budget": budget_status(),
+            }
+            logger.info("Skipping options analyze (%s) — budget: %s", trigger, budget_reason)
+            _last_options_run = out
+            return out
+
+        ok, elapsed = analyze_cooldown_ok()
+        if not ok and not force_cooldown:
+            out = {
+                "skipped": True,
+                "reason": "cooldown",
+                "elapsed_minutes": elapsed,
+                "status": status,
+                "trigger": trigger,
+            }
+            _last_options_run = out
+            return out
+        # Hourly options: only soft-block if another analyze ran in the last ~20m
+        min_gap = float(settings.options_analyze_min_gap_minutes)
+        if force_cooldown and not ok and (elapsed or 0) < min_gap:
+            out = {
+                "skipped": True,
+                "reason": "recent_run",
+                "elapsed_minutes": elapsed,
+                "status": status,
+                "trigger": trigger,
+            }
+            _last_options_run = out
+            return out
+
+        from app.options_pipeline import run_options_analysis
+
+        logger.info("Options analyze starting trigger=%s", trigger)
+        try:
+            result = run_options_analysis(send_notification=True, trigger=f"options_{trigger}")
+            try:
+                record_analyze()
+            except Exception:  # noqa: BLE001
+                logger.warning("Could not record options analyze budget", exc_info=True)
+            _last_options_run = _record_options_analyze(result, trigger=trigger, status=status)
+            _last_options_run["budget"] = budget_status()
+            logger.info("Options analyze done (%s): %s", trigger, _last_options_run["recommendation"])
+            return _last_options_run
+        except LLMError as exc:
+            logger.error("Options analyze LLM error (%s): %s", trigger, exc)
+            _last_options_run = {
+                "skipped": False,
+                "ok": False,
+                "error": str(exc),
+                "status": status,
+                "trigger": trigger,
+                "budget": budget_status(),
+            }
+            return _last_options_run
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Options analyze failed (%s)", trigger)
+            _last_options_run = {
+                "skipped": False,
+                "ok": False,
+                "error": str(exc),
+                "status": status,
+                "trigger": trigger,
+            }
+            return _last_options_run
+    finally:
+        _options_analyze_lock.release()
+
+
+def _options_backup_job() -> None:
+    _maybe_options_analyze("backup", force_cooldown=True)
+
+
+def _options_position_monitor_job() -> None:
+    global _last_options_position_check
+    status = market_hours_status()
+    if not is_market_hours():
+        _last_options_position_check = {
+            "skipped": True,
+            "reason": "outside_market_hours",
+            "status": status,
+        }
+        return
+    try:
+        from app.options_trades import options_positions_need_review
+
+        review = options_positions_need_review()
+        _last_options_position_check = {"ok": True, "status": status, **review}
+        if not review.get("needed"):
+            logger.info("Options position monitor: no exit bands hit")
+            return
+        logger.info("Options position monitor trigger: %s", review.get("reasons"))
+        analyze_result = _maybe_options_analyze("position_monitor")
+        _last_options_position_check["analyze"] = analyze_result
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Options position monitor failed")
+        _last_options_position_check = {"ok": False, "error": str(exc), "status": status}
 
 
 def _news_scan_job() -> None:
@@ -323,6 +499,39 @@ def start_scheduler() -> BackgroundScheduler | None:
             replace_existing=True,
         )
 
+    if settings.options_scheduler_enabled:
+        options_backup_every = max(1, int(settings.options_backup_analyze_hours))
+        options_backup_hours = list(
+            range(settings.market_start_hour, settings.market_end_hour + 1, options_backup_every)
+        )
+        if settings.market_start_hour not in options_backup_hours:
+            options_backup_hours.insert(0, settings.market_start_hour)
+        options_backup_hour_expr = ",".join(str(h) for h in sorted(set(options_backup_hours)))
+        # Stagger to :30 so we don't collide with stock backup at :00
+        # With OPTIONS_BACKUP_ANALYZE_HOURS=1 this is every hour Mon–Fri 9:30–16:30 ET
+        sched.add_job(
+            _options_backup_job,
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour=options_backup_hour_expr,
+                minute=30,
+                timezone=settings.market_timezone,
+            ),
+            id="khabari_options_backup_analyze",
+            replace_existing=True,
+        )
+        sched.add_job(
+            _options_position_monitor_job,
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour=hour_window,
+                minute=_cron_minute_expr(settings.position_monitor_minutes, minimum=15),
+                timezone=settings.market_timezone,
+            ),
+            id="khabari_options_position_monitor",
+            replace_existing=True,
+        )
+
     sched.start()
     # Drop legacy job id from older deployments if it somehow exists
     try:
@@ -333,15 +542,16 @@ def start_scheduler() -> BackgroundScheduler | None:
 
     _scheduler = sched
     logger.info(
-        "Scheduler started (free-tier safe): backup@%s + news/%sm + positions/%sm "
-        "+ day_wrap@%02d:%02d; max %s analyzes / %s LLM calls per day",
+        "Scheduler started: backup@%s + news/%sm + positions/%sm "
+        "+ day_wrap@%02d:%02d; max %s analyzes / $%.2f daily / $%.2f monthly",
         backup_hour_expr,
         settings.news_scan_minutes,
         settings.position_monitor_minutes,
         settings.day_wrap_hour if settings.day_wrap_enabled else -1,
         settings.day_wrap_minute if settings.day_wrap_enabled else -1,
         settings.max_analyzes_per_day,
-        settings.max_llm_calls_per_day,
+        settings.max_daily_spend_usd,
+        settings.max_monthly_spend_usd,
     )
 
     # If we start mid-session (or wake from sleep), don't wait for the next cron tick
@@ -405,6 +615,8 @@ def scheduler_status() -> dict[str, Any]:
         "last_news_scan": _last_news_scan,
         "last_position_check": _last_position_check,
         "last_day_wrap": _last_day_wrap,
+        "last_options_run": _last_options_run,
+        "last_options_position_check": _last_options_position_check,
         "settings": {
             "news_scan_minutes": settings.news_scan_minutes,
             "position_monitor_minutes": settings.position_monitor_minutes,
@@ -412,6 +624,8 @@ def scheduler_status() -> dict[str, Any]:
             "backup_analyze_hours": settings.backup_analyze_hours,
             "max_analyzes_per_day": settings.max_analyzes_per_day,
             "max_llm_calls_per_day": settings.max_llm_calls_per_day,
+            "max_daily_spend_usd": settings.max_daily_spend_usd,
+            "max_monthly_spend_usd": settings.max_monthly_spend_usd,
             "news_min_new_articles": settings.news_min_new_articles,
             "min_notify_confidence": settings.min_notify_confidence,
             "notify_only_actionable": settings.notify_only_actionable,
@@ -420,6 +634,14 @@ def scheduler_status() -> dict[str, Any]:
             "day_wrap_enabled": settings.day_wrap_enabled,
             "day_wrap_hour": settings.day_wrap_hour,
             "day_wrap_minute": settings.day_wrap_minute,
+            "options_scheduler_enabled": settings.options_scheduler_enabled,
+            "options_min_notify_confidence": settings.options_min_notify_confidence,
+            "options_backup_analyze_hours": settings.options_backup_analyze_hours,
+            "options_analyze_min_gap_minutes": settings.options_analyze_min_gap_minutes,
+            "options_auto_movers": settings.options_auto_movers,
+            "options_mover_top_n": settings.options_mover_top_n,
+            "options_mover_min_abs_pct": settings.options_mover_min_abs_pct,
+            "options_data_source": "yfinance",
         },
         "budget": budget_status(),
     }

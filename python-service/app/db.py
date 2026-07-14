@@ -53,14 +53,25 @@ def ensure_indexes() -> None:
     db.watchlist.create_index("ticker", unique=True)
     db.trades.create_index([("ts", DESCENDING)])
     db.meta.create_index("updated_at")
+    # Options twin collections
+    db.options_watchlist.create_index("ticker", unique=True)
+    db.options_portfolio.create_index([("ts", DESCENDING)])
+    db.options_recommendations.create_index([("ts", DESCENDING)])
+    db.options_recommendations.create_index("status")
+    db.options_trades.create_index([("ts", DESCENDING)])
+    db.options_chains.create_index([("ticker", ASCENDING), ("ts", DESCENDING)])
 
 
 def seed_defaults() -> None:
-    """Seed watchlist + $1000 cash portfolio if empty."""
+    """Seed watchlist + $1000 cash portfolio if empty; sync famous stock list when enabled."""
     settings = get_settings()
     db = get_db()
 
-    if db.watchlist.count_documents({}) == 0:
+    if settings.watchlist_auto_famous:
+        # Keep stock universe on a researched famous/liquid set
+        set_watchlist(settings.watchlist_symbols)
+        logger.info("Stock watchlist synced to famous set: %s", settings.watchlist_symbols)
+    elif db.watchlist.count_documents({}) == 0:
         db.watchlist.insert_many(
             [{"ticker": t, "active": True} for t in settings.watchlist_symbols]
         )
@@ -76,6 +87,23 @@ def seed_defaults() -> None:
             }
         )
         logger.info("Seeded portfolio with cash=%s", settings.initial_cash)
+
+    if db.options_watchlist.count_documents({}) == 0:
+        db.options_watchlist.insert_many(
+            [{"ticker": t, "active": True} for t in settings.options_watchlist_symbols]
+        )
+        logger.info("Seeded options watchlist: %s", settings.options_watchlist_symbols)
+
+    if db.options_portfolio.count_documents({}) == 0:
+        db.options_portfolio.insert_one(
+            {
+                "ts": datetime.now(timezone.utc),
+                "cash": settings.options_initial_cash,
+                "positions": {},
+                "source": "system",
+            }
+        )
+        logger.info("Seeded options portfolio with cash=%s", settings.options_initial_cash)
 
 
 def init_db() -> None:
@@ -208,6 +236,96 @@ def serialize_mongo(doc: Any) -> Any:
     return doc
 
 
+def get_active_options_watchlist() -> list[str]:
+    docs = list(get_db().options_watchlist.find({"active": True}).sort("ticker", ASCENDING))
+    if docs:
+        return [str(d["ticker"]).upper() for d in docs]
+    return get_settings().options_watchlist_symbols
+
+
+def set_options_watchlist(tickers: list[str]) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for raw in tickers:
+        t = str(raw).strip().upper()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        cleaned.append(t)
+    if not cleaned:
+        raise ValueError("Options watchlist must include at least one ticker")
+    db = get_db()
+    db.options_watchlist.delete_many({})
+    db.options_watchlist.insert_many(
+        [{"ticker": t, "active": True, "updated_at": _now()} for t in cleaned]
+    )
+    logger.info("Options watchlist updated: %s", cleaned)
+    return cleaned
+
+
+def get_latest_options_portfolio() -> dict[str, Any]:
+    doc = get_db().options_portfolio.find_one(sort=[("ts", DESCENDING)])
+    if not doc:
+        settings = get_settings()
+        return {"cash": settings.options_initial_cash, "positions": {}}
+    return {
+        "cash": float(doc.get("cash", 0)),
+        "positions": doc.get("positions") or {},
+        "ts": doc.get("ts"),
+        "source": doc.get("source"),
+    }
+
+
+def save_options_portfolio(cash: float, positions: dict[str, Any], source: str = "manual") -> str:
+    result = get_db().options_portfolio.insert_one(
+        {
+            "ts": _now(),
+            "cash": cash,
+            "positions": positions,
+            "source": source,
+        }
+    )
+    return str(result.inserted_id)
+
+
+def save_options_recommendation(rec: dict[str, Any], *, extras: dict[str, Any] | None = None) -> str:
+    doc = {
+        **rec,
+        "ts": _now(),
+        "status": "pending",
+        "asset_class": "options",
+        "extras": extras or {},
+    }
+    result = get_db().options_recommendations.insert_one(doc)
+    return str(result.inserted_id)
+
+
+def get_latest_options_recommendation() -> dict[str, Any] | None:
+    doc = get_db().options_recommendations.find_one(sort=[("ts", DESCENDING)])
+    if not doc:
+        return None
+    doc["id"] = str(doc.pop("_id"))
+    return doc
+
+
+def save_options_chain_snapshot(ticker: str, payload: dict[str, Any]) -> str:
+    result = get_db().options_chains.insert_one(
+        {
+            "ticker": ticker.upper(),
+            "ts": _now(),
+            "raw_count": payload.get("raw_counts", {}).get(ticker.upper())
+            if isinstance(payload.get("raw_counts"), dict)
+            else payload.get("count"),
+            "candidate_count": len((payload.get("by_ticker") or {}).get(ticker.upper()) or payload.get("candidates") or []),
+            "candidates": (payload.get("by_ticker") or {}).get(ticker.upper())
+            or payload.get("candidates")
+            or [],
+            "errors": payload.get("errors"),
+        }
+    )
+    return str(result.inserted_id)
+
+
 def health_status() -> dict[str, Any]:
     try:
         ping()
@@ -220,6 +338,8 @@ def health_status() -> dict[str, Any]:
                 "news": db.news.estimated_document_count(),
                 "recommendations": db.recommendations.estimated_document_count(),
                 "portfolio": db.portfolio.estimated_document_count(),
+                "options_recommendations": db.options_recommendations.estimated_document_count(),
+                "options_portfolio": db.options_portfolio.estimated_document_count(),
             },
         }
     except PyMongoError as exc:

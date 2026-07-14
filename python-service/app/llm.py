@@ -19,6 +19,14 @@ from app.prompts import (
     news_user_prompt,
     tech_user_prompt,
 )
+from app.options_prompts import (
+    OPTIONS_DECISION_SYSTEM,
+    OPTIONS_NEWS_SYSTEM,
+    OPTIONS_TECH_SYSTEM,
+    options_decision_user_prompt,
+    options_news_user_prompt,
+    options_tech_user_prompt,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +40,302 @@ def _extract_json(text: str) -> Any:
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
-    return json.loads(text)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        # Model sometimes wraps JSON in prose — take the outermost object/array
+        start_obj, start_arr = text.find("{"), text.find("[")
+        starts = [i for i in (start_obj, start_arr) if i >= 0]
+        if not starts:
+            raise
+        start = min(starts)
+        end_obj, end_arr = text.rfind("}"), text.rfind("]")
+        end = max(end_obj, end_arr)
+        if end <= start:
+            raise
+        return json.loads(text[start : end + 1])
+
+
+def chat_json(system: str, user: str, *, temperature: float = 0.4) -> Any:
+    settings = get_settings()
+    provider = (settings.llm_provider or "gemini").lower()
+
+    def _once(temp: float) -> str:
+        if provider == "openai":
+            return _chat_openai(system, user, temperature=temp)
+        if settings.gemini_api_key:
+            try:
+                return _chat_gemini(system, user, temperature=temp)
+            except LLMError as exc:
+                if settings.openai_api_key and _is_transient_gemini(0, str(exc)):
+                    logger.warning("All Gemini models failed; falling back to OpenAI in same run")
+                    return _chat_openai(system, user, temperature=temp)
+                raise
+        if settings.openai_api_key:
+            return _chat_openai(system, user, temperature=temp)
+        raise LLMError("No LLM key set. Add GEMINI_API_KEY (or OPENAI_API_KEY).")
+
+    last_content = ""
+    for attempt, temp in enumerate((temperature, max(0.1, temperature - 0.2)), start=1):
+        try:
+            last_content = _once(temp)
+            return _extract_json(last_content)
+        except json.JSONDecodeError:
+            if attempt == 1:
+                logger.warning("LLM returned invalid JSON; retrying once")
+                continue
+            raise LLMError(f"Model did not return valid JSON: {last_content[:300]}")
+        except LLMError:
+            raise
+    raise LLMError(f"Model did not return valid JSON: {last_content[:300]}")
+
+
+def _ticker_batches(keys: list[str], size: int | None = None) -> list[list[str]]:
+    settings = get_settings()
+    n = max(1, int(size if size is not None else settings.llm_ticker_batch_size))
+    return [keys[i : i + n] for i in range(0, len(keys), n)]
+
+
+def _subset_dict(data: dict[str, Any], keys: list[str]) -> dict[str, Any]:
+    return {k: data[k] for k in keys if k in data}
+
+
+def run_news_agent(headlines: dict[str, list[str]]) -> dict[str, Any]:
+    keys = list(headlines.keys())
+    if not keys:
+        return {}
+    merged: dict[str, Any] = {}
+    for batch in _ticker_batches(keys):
+        chunk = _subset_dict(headlines, batch)
+        logger.info("News agent batch tickers=%s", batch)
+        try:
+            part = chat_json(NEWS_SYSTEM, news_user_prompt(chunk), temperature=0.3)
+            if isinstance(part, dict):
+                merged.update(part)
+        except LLMError as exc:
+            logger.warning("News agent batch failed %s (%s); using raw headlines", batch, exc)
+            for t, h in chunk.items():
+                merged[t] = h[:3] if isinstance(h, list) else [str(h)]
+    return merged
+
+
+def run_technical_agent(indicators: dict[str, Any]) -> dict[str, Any]:
+    slim = {
+        t: {
+            k: v
+            for k, v in vals.items()
+            if k
+            in {
+                "price",
+                "rsi",
+                "macd",
+                "macd_signal",
+                "ema20",
+                "ema50",
+                "ema200",
+                "bb_upper",
+                "bb_lower",
+                "atr",
+                "adx",
+            }
+        }
+        for t, vals in indicators.items()
+    }
+    keys = list(slim.keys())
+    if not keys:
+        return {}
+    merged: dict[str, Any] = {}
+    for batch in _ticker_batches(keys):
+        chunk = _subset_dict(slim, batch)
+        logger.info("Technical agent batch tickers=%s", batch)
+        try:
+            part = chat_json(TECH_SYSTEM, tech_user_prompt(chunk), temperature=0.3)
+            if isinstance(part, dict):
+                merged.update(part)
+        except LLMError as exc:
+            logger.warning("Technical agent batch failed %s (%s)", batch, exc)
+            for t, vals in chunk.items():
+                merged[t] = f"Indicators only (LLM batch failed): RSI={vals.get('rsi')} MACD={vals.get('macd')}"
+    return merged
+
+
+def run_decision_agent(context: dict[str, Any]) -> dict[str, Any]:
+    return chat_json(DECISION_SYSTEM, decision_user_prompt(context), temperature=0.5)
+
+
+def run_options_news_agent(headlines: dict[str, list[str]]) -> dict[str, Any]:
+    keys = list(headlines.keys())
+    if not keys:
+        return {}
+    merged: dict[str, Any] = {}
+    for batch in _ticker_batches(keys):
+        chunk = _subset_dict(headlines, batch)
+        logger.info("Options news agent batch tickers=%s", batch)
+        try:
+            part = chat_json(
+                OPTIONS_NEWS_SYSTEM,
+                options_news_user_prompt(chunk),
+                temperature=0.3,
+            )
+            if isinstance(part, dict):
+                merged.update(part)
+        except LLMError as exc:
+            logger.warning("Options news batch failed %s (%s); using raw headlines", batch, exc)
+            for t, h in chunk.items():
+                merged[t] = h[:3] if isinstance(h, list) else [str(h)]
+    return merged
+
+
+def run_options_technical_agent(payload: dict[str, Any]) -> dict[str, Any]:
+    # Trim candidate lists per ticker for token cost
+    slim_candidates: dict[str, list[dict[str, Any]]] = {}
+    for ticker, rows in (payload.get("candidates_by_ticker") or {}).items():
+        slim_candidates[ticker] = [
+            {
+                k: r.get(k)
+                for k in (
+                    "key",
+                    "right",
+                    "strike",
+                    "expiry",
+                    "dte",
+                    "mid",
+                    "delta",
+                    "iv",
+                    "open_interest",
+                    "volume",
+                    "spread_pct",
+                    "scan_score",
+                )
+            }
+            for r in (rows or [])[:4]
+        ]
+
+    indicators = payload.get("indicators") or {}
+    keys = sorted(set(list(indicators.keys()) + list(slim_candidates.keys())))
+    if not keys:
+        return {}
+
+    merged: dict[str, Any] = {}
+    for batch in _ticker_batches(keys):
+        body = {
+            "indicators": _subset_dict(indicators, batch),
+            "candidates_by_ticker": _subset_dict(slim_candidates, batch),
+        }
+        logger.info("Options technical agent batch tickers=%s", batch)
+        try:
+            part = chat_json(
+                OPTIONS_TECH_SYSTEM,
+                options_tech_user_prompt(body),
+                temperature=0.3,
+            )
+            if isinstance(part, dict):
+                merged.update(part)
+        except LLMError as exc:
+            logger.warning("Options technical batch failed %s (%s)", batch, exc)
+            for t in batch:
+                merged[t] = {
+                    "spot_bias": "neutral",
+                    "note": "LLM batch failed; use scan candidates only",
+                    "preferred": "none",
+                }
+    return merged
+
+
+def run_options_decision_agent(context: dict[str, Any]) -> dict[str, Any]:
+    """
+    Two-pass decision to keep each Gemini call small:
+    1) Score underlyings in tiny batches
+    2) Final BUY/HOLD pick using only the top shortlist + their candidates
+    """
+    candidates = list(context.get("candidates") or [])
+    by_und: dict[str, list[dict[str, Any]]] = {}
+    for c in candidates:
+        und = str(c.get("underlying") or "").upper()
+        if und:
+            by_und.setdefault(und, []).append(c)
+
+    news = context.get("news") or {}
+    tech = context.get("technical") or {}
+    prices = context.get("prices") or {}
+    tickers = sorted(
+        set(list(by_und.keys()) + list(news.keys()) + list(tech.keys()) + list(prices.keys()))
+    )
+    if not tickers:
+        tickers = [str(context.get("ticker") or "SPY")]
+
+    ranked_all: list[dict[str, Any]] = []
+    for batch in _ticker_batches(tickers):
+        mini_ctx = {
+            "portfolio": context.get("portfolio"),
+            "mandate": (
+                "Rank ONLY these underlyings for short-term long call/put edge. "
+                "Return JSON with ranked array only (no final trade yet)."
+            ),
+            "news": _subset_dict(news if isinstance(news, dict) else {}, batch),
+            "technical": _subset_dict(tech if isinstance(tech, dict) else {}, batch),
+            "candidates": [c for t in batch for c in by_und.get(t, [])][:8],
+            "prices": _subset_dict(prices if isinstance(prices, dict) else {}, batch),
+            "phase": "rank_only",
+            "tickers": batch,
+        }
+        logger.info("Options decision rank batch tickers=%s", batch)
+        try:
+            part = chat_json(
+                OPTIONS_DECISION_SYSTEM
+                + "\nFor this call: fill ranked for the given tickers only. "
+                "Set action=HOLD, investment=0. Do not invent contracts.",
+                options_decision_user_prompt(mini_ctx),
+                temperature=0.3,
+            )
+            rows = part.get("ranked") if isinstance(part, dict) else None
+            if isinstance(rows, list):
+                ranked_all.extend(rows)
+        except LLMError as exc:
+            logger.warning("Options rank batch failed %s (%s)", batch, exc)
+            for t in batch:
+                ranked_all.append(
+                    {"ticker": t, "score": 40, "bias": "HOLD", "note": "rank batch failed"}
+                )
+
+    ranked_all.sort(key=lambda r: float(r.get("score") or 0), reverse=True)
+    # Shortlist top names for the final (small) decision call
+    shortlist = []
+    seen: set[str] = set()
+    for row in ranked_all:
+        t = str(row.get("ticker") or "").upper()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        shortlist.append(t)
+        if len(shortlist) >= 3:
+            break
+    if not shortlist:
+        shortlist = tickers[:3]
+
+    final_ctx = {
+        "portfolio": context.get("portfolio"),
+        "mandate": context.get("mandate"),
+        "trigger": context.get("trigger"),
+        "news": _subset_dict(news if isinstance(news, dict) else {}, shortlist),
+        "technical": _subset_dict(tech if isinstance(tech, dict) else {}, shortlist),
+        "candidates": [c for t in shortlist for c in by_und.get(t, [])][:12],
+        "prices": _subset_dict(prices if isinstance(prices, dict) else {}, shortlist),
+        "pre_ranked": ranked_all[:12],
+        "shortlist": shortlist,
+        "phase": "final_pick",
+    }
+    logger.info("Options decision final shortlist=%s", shortlist)
+    decision = chat_json(
+        OPTIONS_DECISION_SYSTEM
+        + "\nUse pre_ranked as prior scores. Pick the single best trade from candidates "
+        "on the shortlist, or HOLD if none clears the bar.",
+        options_decision_user_prompt(final_ctx),
+        temperature=0.4,
+    )
+    if isinstance(decision, dict) and not decision.get("ranked"):
+        decision["ranked"] = ranked_all[:20]
+    return decision
 
 
 def _gemini_model_chain() -> list[str]:
@@ -110,7 +413,7 @@ def _chat_gemini(system: str, user: str, *, temperature: float) -> str:
     data: dict[str, Any] | None = None
     used_model = models[0]
 
-    with httpx.Client(timeout=90.0) as client:
+    with httpx.Client(timeout=180.0) as client:
         for model_idx, model in enumerate(models):
             # One quick retry on the same model for transient 503, then switch models
             for attempt in range(1, 3):
@@ -235,64 +538,3 @@ def _chat_openai(system: str, user: str, *, temperature: float) -> str:
         model=settings.openai_model,
     )
     return data["choices"][0]["message"]["content"]
-
-
-def chat_json(system: str, user: str, *, temperature: float = 0.4) -> Any:
-    settings = get_settings()
-    provider = (settings.llm_provider or "gemini").lower()
-
-    if provider == "openai":
-        content = _chat_openai(system, user, temperature=temperature)
-    else:
-        if settings.gemini_api_key:
-            try:
-                content = _chat_gemini(system, user, temperature=temperature)
-            except LLMError as exc:
-                # Last resort in the same run: OpenAI if configured
-                if settings.openai_api_key and _is_transient_gemini(0, str(exc)):
-                    logger.warning("All Gemini models failed; falling back to OpenAI in same run")
-                    content = _chat_openai(system, user, temperature=temperature)
-                else:
-                    raise
-        elif settings.openai_api_key:
-            content = _chat_openai(system, user, temperature=temperature)
-        else:
-            raise LLMError("No LLM key set. Add GEMINI_API_KEY (or OPENAI_API_KEY).")
-
-    try:
-        return _extract_json(content)
-    except json.JSONDecodeError as exc:
-        raise LLMError(f"Model did not return valid JSON: {content[:300]}") from exc
-
-
-def run_news_agent(headlines: dict[str, list[str]]) -> dict[str, Any]:
-    return chat_json(NEWS_SYSTEM, news_user_prompt(headlines), temperature=0.3)
-
-
-def run_technical_agent(indicators: dict[str, Any]) -> dict[str, Any]:
-    slim = {
-        t: {
-            k: v
-            for k, v in vals.items()
-            if k
-            in {
-                "price",
-                "rsi",
-                "macd",
-                "macd_signal",
-                "ema20",
-                "ema50",
-                "ema200",
-                "bb_upper",
-                "bb_lower",
-                "atr",
-                "adx",
-            }
-        }
-        for t, vals in indicators.items()
-    }
-    return chat_json(TECH_SYSTEM, tech_user_prompt(slim), temperature=0.3)
-
-
-def run_decision_agent(context: dict[str, Any]) -> dict[str, Any]:
-    return chat_json(DECISION_SYSTEM, decision_user_prompt(context), temperature=0.5)

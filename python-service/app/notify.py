@@ -12,8 +12,16 @@ from app.config import get_settings
 logger = logging.getLogger(__name__)
 
 
-def _confirm_url(recommendation_id: str | None = None) -> str:
+def _confirm_url(recommendation_id: str | None = None, *, tab: str | None = None) -> str:
     settings = get_settings()
+    # Options always confirm on Khabari desk (Hisaab has no options UI yet)
+    if tab == "options":
+        base = (settings.public_base_url or "http://localhost:8000").rstrip("/")
+        url = f"{base}/desk?tab=options"
+        if recommendation_id:
+            url = f"{url}&id={recommendation_id}"
+        return url
+
     base = (settings.hisaab_base_url or settings.public_base_url or "http://localhost:8000").rstrip("/")
     # Prefer Hisaab /trades (phone); fall back to Khabari /desk
     path = "/trades" if settings.hisaab_base_url else "/desk"
@@ -61,6 +69,55 @@ def format_recommendation_message(
     )
 
 
+def format_options_recommendation_message(
+    rec: dict[str, Any],
+    *,
+    markdown: bool = False,
+    recommendation_id: str | None = None,
+) -> str:
+    desk = _confirm_url(recommendation_id, tab="options")
+    reasons = rec.get("reasoning") or []
+    right = (rec.get("right") or "").upper()
+    strike = rec.get("strike")
+    expiry = rec.get("expiry")
+    contracts = rec.get("contracts")
+    premium = rec.get("premium")
+    max_loss = rec.get("max_loss")
+    contract_line = (
+        f"{rec.get('ticker')} {right} ${strike} exp {expiry} × {contracts} @ ${premium}"
+        if right and strike is not None
+        else f"{rec.get('action')} {rec.get('ticker')}"
+    )
+    sync_line = f"\n\nAfter you trade, confirm on Options desk:\n{desk}"
+
+    if markdown:
+        bullets = "\n".join(f"• {r}" for r in reasons) or "• (none)"
+        return (
+            "🚨 *Options Recommendation*\n\n"
+            f"*{rec.get('action')}* — {contract_line}\n"
+            f"Premium at risk / proceeds: ${rec.get('investment')} · Max loss: ${max_loss}\n"
+            f"Confidence: {rec.get('confidence')}% · Risk: {rec.get('risk')}\n\n"
+            f"*Reasons:*\n{bullets}\n\n"
+            f"Horizon: {rec.get('time_horizon')}\n"
+            f"Expected: {rec.get('expected_return')}\n"
+            f"Options cash left: ${rec.get('remaining_cash', '—')}"
+            f"{sync_line}"
+        )
+
+    bullets = "\n".join(f"• {r}" for r in reasons) or "• (none)"
+    return (
+        "Options Recommendation\n\n"
+        f"{rec.get('action')} — {contract_line}\n"
+        f"Premium at risk / proceeds: ${rec.get('investment')} · Max loss: ${max_loss}\n"
+        f"Confidence: {rec.get('confidence')}% · Risk: {rec.get('risk')}\n\n"
+        f"Reasons:\n{bullets}\n\n"
+        f"Horizon: {rec.get('time_horizon')}\n"
+        f"Expected: {rec.get('expected_return')}\n"
+        f"Options cash left: ${rec.get('remaining_cash', '—')}"
+        f"{sync_line}"
+    )
+
+
 def send_ntfy(
     title: str,
     message: str,
@@ -74,10 +131,14 @@ def send_ntfy(
     if not topic:
         raise RuntimeError("NTFY_TOPIC is not set")
 
+    # ntfy header values must be latin-1; keep body UTF-8
+    def _hdr(s: str) -> str:
+        return (s or "").replace("\n", " ").encode("ascii", "replace").decode("ascii")
+
     base = settings.ntfy_server.rstrip("/")
     url = f"{base}/{topic}"
     headers = {
-        "Title": title,
+        "Title": _hdr(title)[:180],
         "Priority": priority,
         "Tags": tags,
     }
@@ -226,6 +287,65 @@ def notify_recommendation(
             results["sent"].append(send_telegram(md))
         except Exception as exc:  # noqa: BLE001
             logger.warning("telegram failed: %s", exc)
+            results["errors"].append({"channel": "telegram", "error": str(exc)})
+
+    results["ok"] = bool(results["sent"])
+    results["message"] = plain
+    results["desk_url"] = desk
+    if not results["sent"] and not results["errors"]:
+        results["errors"].append(
+            {
+                "channel": "none",
+                "error": "No notifier configured (set NTFY_TOPIC or Telegram creds)",
+            }
+        )
+    return results
+
+
+def notify_options_recommendation(
+    rec: dict[str, Any],
+    *,
+    recommendation_id: str | None = None,
+) -> dict[str, Any]:
+    settings = get_settings()
+    results: dict[str, Any] = {"sent": [], "errors": []}
+    desk = _confirm_url(recommendation_id, tab="options")
+
+    plain = format_options_recommendation_message(
+        rec, markdown=False, recommendation_id=recommendation_id
+    )
+    md = format_options_recommendation_message(
+        rec, markdown=True, recommendation_id=recommendation_id
+    )
+    right = (rec.get("right") or "").upper()
+    action = str(rec.get("action") or "HOLD").upper()
+    if action == "HOLD":
+        title = f"OPT HOLD - no trade ({rec.get('ticker') or 'scan'})"
+    else:
+        title = (
+            f"OPT {action} {rec.get('ticker')} {right} "
+            f"${rec.get('strike')} x{rec.get('contracts')}"
+        )
+
+    if settings.ntfy_topic:
+        try:
+            results["sent"].append(
+                send_ntfy(
+                    title,
+                    plain,
+                    click_url=desk,
+                    tags="chart_with_upwards_trend,zap",
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("ntfy options failed: %s", exc)
+            results["errors"].append({"channel": "ntfy", "error": str(exc)})
+
+    if settings.telegram_bot_token and settings.telegram_chat_id:
+        try:
+            results["sent"].append(send_telegram(md))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("telegram options failed: %s", exc)
             results["errors"].append({"channel": "telegram", "error": str(exc)})
 
     results["ok"] = bool(results["sent"])
