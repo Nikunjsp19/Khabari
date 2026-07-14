@@ -17,12 +17,17 @@ def now_market() -> datetime:
 
 
 def is_market_hours(when: datetime | None = None) -> bool:
-    """True Mon–Fri between start_hour and end_hour inclusive (local market tz)."""
+    """True Mon–Fri within the trade window [start_hour:00, end_hour:00] (local market tz).
+
+    The window closes exactly at end_hour o'clock (e.g. 16:00 = 4pm). Times after
+    4:00pm are outside the window instead of running through the whole 4pm hour.
+    """
     settings = get_settings()
     dt = when.astimezone(market_tz()) if when else now_market()
     if dt.weekday() > 4:  # Sat=5 Sun=6
         return False
-    return settings.market_start_hour <= dt.hour <= settings.market_end_hour
+    minutes = dt.hour * 60 + dt.minute
+    return settings.market_start_hour * 60 <= minutes <= settings.market_end_hour * 60
 
 
 def market_hours_status() -> dict:
@@ -34,7 +39,7 @@ def market_hours_status() -> dict:
         "now": dt.isoformat(),
         "timezone": settings.market_timezone,
         "days": "Mon–Fri",
-        "hours": f"{settings.market_start_hour:02d}:00–{settings.market_end_hour:02d}:59",
+        "hours": f"{settings.market_start_hour:02d}:00–{settings.market_end_hour:02d}:00",
         "weekday": dt.strftime("%A"),
         "message": (
             "Within trading window — analysis allowed"
