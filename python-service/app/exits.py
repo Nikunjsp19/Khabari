@@ -206,8 +206,8 @@ def evaluate_exits(marked: dict[str, Any] | None = None) -> dict[str, Any]:
                 )
             decision = {"kind": kind, "reason": reason}
 
-        # 2) Take-profit target
-        elif pnl_pct >= tp_pct:
+        # 2) Take-profit target (tp_pct <= 0 disables it → let winners run)
+        elif tp_pct > 0 and pnl_pct >= tp_pct:
             decision = {
                 "kind": "take_profit",
                 "reason": f"{ticker} +{pnl_pct:.1f}% ≥ take-profit {tp_pct:.1f}% — lock the gain",

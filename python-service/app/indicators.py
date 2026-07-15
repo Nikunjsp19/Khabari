@@ -56,10 +56,19 @@ def compute_indicators(
     if df.empty:
         raise ValueError(f"Empty OHLCV after dropna for {symbol}")
 
+    add_indicator_columns(df)
+    return snapshot_from_frame(df, symbol, -1)
+
+
+def add_indicator_columns(df: "pd.DataFrame") -> "pd.DataFrame":
+    """Attach the full indicator column set in place (RSI/MACD/EMA/BB/ATR/ADX/…).
+
+    Shared by the live path and the backtester so both score identical inputs.
+    """
     close = df["Close"]
     high = df["High"]
     low = df["Low"]
-    volume = df["Volume"]
+    volume = df.get("Volume")
 
     df["RSI"] = ta.rsi(close, length=14)
 
@@ -93,7 +102,7 @@ def compute_indicators(
     try:
         df["VWAP"] = ta.vwap(high, low, close, volume)
     except Exception as exc:  # noqa: BLE001 — VWAP needs timezone-aware index sometimes
-        logger.warning("VWAP unavailable for %s: %s", symbol, exc)
+        logger.warning("VWAP unavailable: %s", exc)
         df["VWAP"] = None
 
     adx = ta.adx(high, low, close, length=14)
@@ -107,36 +116,51 @@ def compute_indicators(
             df["DMP"] = adx[dmp_col]
         if dmn_col:
             df["DMN"] = adx[dmn_col]
+    return df
 
-    latest = df.iloc[-1]
-    ts = df.index[-1]
+
+def snapshot_from_frame(df: "pd.DataFrame", symbol: str, i: int = -1) -> dict[str, Any]:
+    """Build an indicator snapshot from row ``i`` (uses only data up to that row)."""
+    row = df.iloc[i]
+    ts = df.index[i]
+
+    def _cell(col: str, digits: int = 2) -> float | None:
+        series = df.get(col)
+        if series is None:
+            return None
+        val = series.iloc[i]
+        return None if pd.isna(val) else round(float(val), digits)
+
+    def _ohlc(col: str) -> float | None:
+        val = row.get(col) if hasattr(row, "get") else row[col]
+        return None if pd.isna(val) else float(val)
 
     return {
-        "ticker": symbol,
+        "ticker": symbol.upper().strip(),
         "ts": ts.isoformat() if hasattr(ts, "isoformat") else str(ts),
-        "price": _round(_latest_scalar(close)),
-        "open": _round(float(latest["Open"]) if pd.notna(latest["Open"]) else None),
-        "high": _round(float(latest["High"]) if pd.notna(latest["High"]) else None),
-        "low": _round(float(latest["Low"]) if pd.notna(latest["Low"]) else None),
-        "close": _round(_latest_scalar(close)),
-        "volume": int(latest["Volume"]) if pd.notna(latest["Volume"]) else None,
-        "rsi": _round(_latest_scalar(df.get("RSI")), 2),
-        "macd": _round(_latest_scalar(df.get("MACD")), 4),
-        "macd_signal": _round(_latest_scalar(df.get("MACD_signal")), 4),
-        "macd_hist": _round(_latest_scalar(df.get("MACD_hist")), 4),
-        "ema20": _round(_latest_scalar(df.get("EMA20"))),
-        "ema50": _round(_latest_scalar(df.get("EMA50"))),
-        "ema200": _round(_latest_scalar(df.get("EMA200"))),
-        "sma50": _round(_latest_scalar(df.get("SMA50"))),
-        "bb_upper": _round(_latest_scalar(df.get("BB_upper"))),
-        "bb_lower": _round(_latest_scalar(df.get("BB_lower"))),
-        "bb_mid": _round(_latest_scalar(df.get("BB_mid"))),
-        "atr": _round(_latest_scalar(df.get("ATR")), 4),
-        "vwap": _round(_latest_scalar(df.get("VWAP"))),
-        "momentum": _round(_latest_scalar(df.get("MOM")), 4),
-        "adx": _round(_latest_scalar(df.get("ADX")), 2),
-        "plus_di": _round(_latest_scalar(df.get("DMP")), 2),
-        "minus_di": _round(_latest_scalar(df.get("DMN")), 2),
+        "price": _round(_ohlc("Close")),
+        "open": _round(_ohlc("Open")),
+        "high": _round(_ohlc("High")),
+        "low": _round(_ohlc("Low")),
+        "close": _round(_ohlc("Close")),
+        "volume": int(row["Volume"]) if pd.notna(row.get("Volume")) else None,
+        "rsi": _cell("RSI", 2),
+        "macd": _cell("MACD", 4),
+        "macd_signal": _cell("MACD_signal", 4),
+        "macd_hist": _cell("MACD_hist", 4),
+        "ema20": _cell("EMA20"),
+        "ema50": _cell("EMA50"),
+        "ema200": _cell("EMA200"),
+        "sma50": _cell("SMA50"),
+        "bb_upper": _cell("BB_upper"),
+        "bb_lower": _cell("BB_lower"),
+        "bb_mid": _cell("BB_mid"),
+        "atr": _cell("ATR", 4),
+        "vwap": _cell("VWAP"),
+        "momentum": _cell("MOM", 4),
+        "adx": _cell("ADX", 2),
+        "plus_di": _cell("DMP", 2),
+        "minus_di": _cell("DMN", 2),
     }
 
 

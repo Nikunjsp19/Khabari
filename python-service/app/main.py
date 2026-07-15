@@ -140,6 +140,7 @@ def root() -> dict[str, Any]:
             "GET /indicators?symbols=TSLA,NVDA",
             "GET /regime",
             "GET /signals",
+            "GET /backtest",
             "GET /exits/check",
             "POST /exits/run",
             "POST /analyze",
@@ -271,6 +272,50 @@ def signals(
         "daily_context": daily_ctx,
         "errors": ind.get("errors", {}),
     }
+
+
+@app.get("/backtest")
+def backtest(
+    symbols: str = Query(""),
+    years: float = Query(2.0, ge=0.25, le=10.0),
+    starting_cash: float = Query(10000.0, gt=0),
+    max_positions: int = Query(5, ge=1, le=25),
+    buy_threshold: float | None = Query(None, ge=0.0, le=100.0),
+    take_profit_pct: float | None = Query(None, ge=0.0, le=200.0),
+    stop_loss_pct: float | None = Query(None, ge=0.0, le=100.0),
+    atr_initial_mult: float | None = Query(None, ge=0.0, le=20.0),
+    atr_trail_mult: float | None = Query(None, ge=0.0, le=20.0),
+    time_stop_days: int | None = Query(None, ge=0, le=365),
+    include_curve: bool = Query(False),
+    include_trades: bool = Query(True),
+) -> dict[str, Any]:
+    """Backtest the deterministic engine over daily history — no LLM, no spend.
+
+    Replays the live entry scoring + exit rules over the last ``years`` of daily
+    data and reports win rate, drawdown, Sharpe, CAGR vs SPY buy-and-hold. Exit
+    parameters default to live settings; override to tune. take_profit_pct=0
+    disables the fixed target (pure trailing-stop / let-winners-run mode).
+    """
+    from app.backtest import run_backtest
+
+    tickers = [s.strip().upper() for s in symbols.split(",") if s.strip()] or None
+    result = run_backtest(
+        tickers,
+        years=years,
+        starting_cash=starting_cash,
+        max_positions=max_positions,
+        buy_threshold=buy_threshold,
+        take_profit_pct=take_profit_pct,
+        stop_loss_pct=stop_loss_pct,
+        atr_initial_mult=atr_initial_mult,
+        atr_trail_mult=atr_trail_mult,
+        time_stop_days=time_stop_days,
+    )
+    if not include_curve:
+        result.pop("equity_curve", None)
+    if not include_trades:
+        result.pop("trades", None)
+    return result
 
 
 @app.get("/exits/check")
