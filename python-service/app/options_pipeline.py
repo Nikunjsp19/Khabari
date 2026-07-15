@@ -301,9 +301,10 @@ def run_options_analysis(
             "trigger": trigger,
         },
     )
+    from app.notify import _confirm_url
+
     final["recommendation_id"] = rec_id
-    confirm_base = settings.public_base_url.rstrip("/")
-    final["desk_url"] = f"{confirm_base}/desk?tab=options&id={rec_id}"
+    final["desk_url"] = _confirm_url(rec_id, tab="options")
 
     notify_ok, notify_reason = should_notify_options(final)
     message = format_options_recommendation_message(final, markdown=False, recommendation_id=rec_id)

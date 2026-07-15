@@ -14,18 +14,26 @@ logger = logging.getLogger(__name__)
 
 def _confirm_url(recommendation_id: str | None = None, *, tab: str | None = None) -> str:
     settings = get_settings()
-    # Options always confirm on Khabari desk (Hisaab has no options UI yet)
+    base = (settings.hisaab_base_url or settings.public_base_url or "http://localhost:8000").rstrip("/")
+    # Prefer Hisaab /trades (phone) for both stocks and options; fall back to Khabari /desk
+    if settings.hisaab_base_url:
+        url = f"{base}/trades"
+        params: list[str] = []
+        if tab == "options":
+            params.append("tab=options")
+        if recommendation_id:
+            params.append(f"id={recommendation_id}")
+        if params:
+            url = f"{url}?{'&'.join(params)}"
+        return url
+
     if tab == "options":
-        base = (settings.public_base_url or "http://localhost:8000").rstrip("/")
         url = f"{base}/desk?tab=options"
         if recommendation_id:
             url = f"{url}&id={recommendation_id}"
         return url
 
-    base = (settings.hisaab_base_url or settings.public_base_url or "http://localhost:8000").rstrip("/")
-    # Prefer Hisaab /trades (phone); fall back to Khabari /desk
-    path = "/trades" if settings.hisaab_base_url else "/desk"
-    url = f"{base}{path}"
+    url = f"{base}/desk"
     if recommendation_id:
         url = f"{url}?id={recommendation_id}"
     return url
@@ -104,7 +112,7 @@ def format_options_recommendation_message(
             f"Premium ({quote_basis}): ${premium} → ${rec.get('investment')} "
             f"for {contracts} contract(s). Re-check live ask before you trade."
         )
-    sync_line = f"\n\nAfter you trade, confirm on Options desk:\n{desk}"
+    sync_line = f"\n\nAfter you trade, confirm in Hisaab:\n{desk}"
 
     if markdown:
         bullets = "\n".join(f"• {r}" for r in reasons) or "• (none)"
