@@ -46,8 +46,10 @@ class Settings(BaseSettings):
     min_notify_confidence: float = 58.0
     notify_only_actionable: bool = True
     # 0 disables the fixed take-profit so winners ride the ATR trailing stop.
-    # Backtests (1/2/3y) showed a fixed +5% target caps winners and turns the
-    # strategy net-negative (PF 0.78); disabling it flips PF to ~2.1 vs SPY.
+    # This is the ONE exit change validated as robust: a fixed +5% target caps
+    # winners and makes the strategy net-negative (PF ~0.9) on BOTH a momentum
+    # universe and a control universe of laggards. Disabling it is trend-
+    # following best practice ("let winners run") and improves both.
     position_take_profit_pct: float = 0.0
     position_stop_loss_pct: float = 3.5  # only used when daily ATR is unavailable
     analyze_period: str = "5d"
@@ -55,7 +57,7 @@ class Settings(BaseSettings):
 
     # --- Deterministic signal engine (quant layer that gates the LLM) ---
     # Score (0-100) a ticker must clear to be flagged BUY by the quant engine.
-    signal_buy_threshold: float = 65.0
+    signal_buy_threshold: float = 60.0
     # Minimum score to even reach the LLM short-list (candidates worth confirming).
     signal_candidate_min_score: float = 55.0
     # How many pre-screened candidates to hand the LLM per run (held names extra).
@@ -72,11 +74,13 @@ class Settings(BaseSettings):
     regime_block_buys_in_risk_off: bool = True
 
     # --- Deterministic exit engine (ATR trailing / initial / time stops) ---
-    # Tuned via backtest: let winners run on a wide 5x ATR Chandelier trail with
-    # a 2x ATR initial stop; no fixed target/time-stop (trend-following exits).
+    # Trend-following exits set to DEFENSIBLE STANDARDS, not backtest-optimized
+    # values (optimizing on a hindsight-selected watchlist overfits). Chandelier
+    # trail = 3x ATR is Chuck LeBeau's published default; 2x ATR initial stop;
+    # no time stop (trend-following lets the trailing stop decide, not a clock).
     exit_engine_enabled: bool = True
     exit_initial_stop_atr_mult: float = 2.0   # initial hard stop = entry - N*ATR(14d)
-    exit_trail_atr_mult: float = 5.0          # Chandelier trailing = high_water - N*ATR(14d)
+    exit_trail_atr_mult: float = 3.0          # Chandelier trailing = high_water - N*ATR(14d)
     exit_time_stop_days: int = 0              # 0 disables; sell stagnant trades after N days
     exit_time_stop_min_profit_pct: float = 1.0  # only time-stop if below this P&L
     exit_alert_cooldown_minutes: float = 60.0  # re-alert the same exit at most this often

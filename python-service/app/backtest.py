@@ -156,33 +156,78 @@ def run_backtest(
     # One batched download: watchlist + SPY + VIX, with ~1y warmup for SMA200.
     dl = list(dict.fromkeys(symbols + [spy_sym, vix_sym]))
     period = f"{int(math.ceil(years)) + 2}y"
-    raw = yf.download(
-        dl, period=period, interval="1d", progress=False, auto_adjust=True, threads=False, group_by="ticker"
-    )
-    if raw is None or raw.empty:
-        raise RuntimeError("No historical data returned")
-    multi = isinstance(raw.columns, pd.MultiIndex)
 
-    def sub(sym: str):
-        if multi:
+    def _download():
+        return yf.download(
+            dl, period=period, interval="1d", progress=False,
+            auto_adjust=True, threads=False, group_by="ticker",
+        )
+
+    def _sub(raw, sym):
+        if raw is None or raw.empty:
+            return None
+        if isinstance(raw.columns, pd.MultiIndex):
             if sym not in raw.columns.get_level_values(0):
                 return None
             return raw[sym].dropna(how="all")
         return raw.dropna(how="all")
 
-    frames: dict[str, Any] = {}
-    for sym in symbols:
-        s = sub(sym)
-        if s is not None and not s.empty and "Close" in s.columns and len(s) > 220:
-            frames[sym] = _prepare_frame(s.copy())
-    if not frames:
-        raise RuntimeError("No tickers had enough history to backtest")
+    # Batched yfinance downloads are flaky: they can silently truncate or drop
+    # tickers, which used to corrupt results. Retry until SPY and the bulk of
+    # the universe come back with data reaching near the latest session.
+    raw = None
+    data_warnings: list[str] = []
+    for attempt in range(3):
+        raw = _download()
+        spy_try = _sub(raw, spy_sym)
+        if spy_try is None or spy_try.empty:
+            data_warnings.append(f"attempt {attempt + 1}: SPY missing, retrying")
+            continue
+        latest = spy_try.index.max()
+        ok = 0
+        for sym in symbols:
+            s = _sub(raw, sym)
+            # Require data within ~1 week of the latest session (not truncated)
+            if s is not None and not s.empty and (latest - s.index.max()).days <= 7:
+                ok += 1
+        if ok >= max(1, int(0.8 * len(symbols))):
+            break
+        data_warnings.append(
+            f"attempt {attempt + 1}: only {ok}/{len(symbols)} tickers had complete data, retrying"
+        )
+    if raw is None or raw.empty:
+        raise RuntimeError("No historical data returned after retries")
+
+    def sub(sym: str):
+        return _sub(raw, sym)
 
     # SPY frame for calendar + regime; VIX close for regime.
     spy = sub(spy_sym)
     if spy is None or spy.empty:
         raise RuntimeError("SPY history unavailable for regime/benchmark")
     spy = spy.copy()
+    latest_session = spy.index.max()
+
+    frames: dict[str, Any] = {}
+    dropped: list[str] = []
+    for sym in symbols:
+        s = sub(sym)
+        # Drop tickers with too little history OR truncated tails (would strand
+        # positions and corrupt equity). Better to exclude than to fake-hold.
+        if (
+            s is None
+            or s.empty
+            or "Close" not in s.columns
+            or len(s) <= 220
+            or (latest_session - s.index.max()).days > 7
+        ):
+            dropped.append(sym)
+            continue
+        frames[sym] = _prepare_frame(s.copy())
+    if not frames:
+        raise RuntimeError("No tickers had complete-enough history to backtest")
+    if dropped:
+        data_warnings.append(f"dropped for incomplete/truncated data: {dropped}")
     spy["SMA200"] = spy["Close"].rolling(200).mean()
     vix_df = sub(vix_sym)
     vix_close = vix_df["Close"] if vix_df is not None and "Close" in vix_df.columns else None
@@ -206,6 +251,29 @@ def run_backtest(
     equity_curve: list[dict[str, Any]] = []
     pending_entries: list[str] = []
 
+    def mark_price(sym: str, date: Any) -> float | None:
+        """Last known close on or before *date* — used to mark/close positions.
+
+        Never strands a position when a ticker is missing a specific session
+        (which previously leaked cash and drove equity to zero).
+        """
+        f = frames.get(sym)
+        if f is None:
+            return None
+        i = pos_index.get(sym, {}).get(date)
+        if i is None:
+            loc = f.index.searchsorted(date, side="right") - 1
+            if loc < 0:
+                return None
+            i = loc
+        close = f["Close"]
+        while i >= 0:
+            v = close.iloc[i]
+            if not pd.isna(v):
+                return float(v)
+            i -= 1
+        return None
+
     def price_at(sym: str, date: Any, col: str) -> float | None:
         f = frames.get(sym)
         i = pos_index.get(sym, {}).get(date)
@@ -226,7 +294,7 @@ def run_backtest(
             if slots_free <= 0 or cash <= 0:
                 break
             regime_now = _current_regime(spy, vix_close, date, settings, _regime_from_values)
-            budget = min(cash, (cash + _holdings_value(positions, date, price_at)) / max_positions)
+            budget = min(cash, (cash + _holdings_value(positions, date, mark_price)) / max_positions)
             budget *= float(regime_now["size_factor"] or 0)
             if budget <= 1:
                 continue
@@ -246,16 +314,17 @@ def run_backtest(
         # --- 2) Manage open positions against the exit rules (intra-day fills)
         for sym in list(positions.keys()):
             pos = positions[sym]
+            op = price_at(sym, date, "Open")
             hi = price_at(sym, date, "High")
             lo = price_at(sym, date, "Low")
             cl = price_at(sym, date, "Close")
             atr = price_at(sym, date, "ATR")
             if cl is None:
                 continue
-            if hi is not None and hi > pos["high_water"]:
-                pos["high_water"] = hi
 
             entry_price = pos["entry_price"]
+            # Use the high-water mark as of the PRIOR session for today's stop —
+            # we can't know today's high before today's low (no intraday look-ahead).
             high_water = pos["high_water"]
             if atr and atr > 0:
                 initial_stop = entry_price - init_mult * atr
@@ -271,7 +340,8 @@ def run_backtest(
             exit_price = None
             kind = None
             if lo is not None and lo <= effective_stop:
-                exit_price = effective_stop
+                # Gap-down through the stop fills at the open, not the stop price
+                exit_price = op if (op is not None and op < effective_stop) else effective_stop
                 kind = "trailing_stop" if trailing_active else "stop_loss"
             elif tp_pct > 0 and hi is not None and hi >= tp_price:
                 exit_price = tp_price
@@ -282,7 +352,11 @@ def run_backtest(
                     exit_price = cl
                     kind = "time_stop"
 
-            if exit_price is not None:
+            if exit_price is None:
+                # No exit today → ratchet the high-water mark up for tomorrow's trail
+                if hi is not None and hi > pos["high_water"]:
+                    pos["high_water"] = hi
+            else:
                 pnl = (exit_price - entry_price) * pos["shares"]
                 pnl_pct = (exit_price / entry_price - 1) * 100.0
                 cash += pos["shares"] * exit_price
@@ -326,15 +400,16 @@ def run_backtest(
                 pending_entries = [s for s, _ in ranked[:slots_free]]
 
         # --- 4) Mark-to-market equity at close
-        equity = cash + _holdings_value(positions, date, price_at)
+        equity = cash + _holdings_value(positions, date, mark_price)
         equity_curve.append(
             {"date": str(date.date()) if hasattr(date, "date") else str(date), "equity": round(equity, 2)}
         )
 
-    # Close any still-open positions at the last close (for honest final equity)
+    # Close any still-open positions at the last known close (never strand a
+    # position — that used to leak cash and crater equity to zero).
     last_date = calendar_bt[-1]
     for sym in list(positions.keys()):
-        cl = price_at(sym, last_date, "Close")
+        cl = mark_price(sym, last_date)
         if cl is None:
             continue
         pos = positions[sym]
@@ -360,8 +435,10 @@ def run_backtest(
     benchmark = _benchmark(spy, calendar_bt)
 
     return {
+        "data_warnings": data_warnings,
         "params": {
             "symbols": list(frames.keys()),
+            "dropped_symbols": dropped,
             "years": years,
             "sessions": len(calendar_bt),
             "start": equity_curve[0]["date"] if equity_curve else None,
@@ -381,17 +458,22 @@ def run_backtest(
         "equity_curve": equity_curve,
         "assumptions": [
             "Signals at close; entries fill next-day open (no look-ahead).",
-            "Stops fill at stop when day low pierces it; take-profit at target when day high reaches it.",
+            "Trailing stop uses the prior session's high-water mark (no intraday look-ahead).",
+            "Stops fill at the stop price, or at the open on a gap-down through it.",
+            "Take-profit fills at target when the day's high reaches it (disabled when tp=0).",
             "Equal-weight sizing across slots, scaled by regime size factor. Fractional shares.",
-            "No commissions, slippage, or taxes. Long-only. Daily timeframe.",
+            "No commissions or slippage beyond gap fills. Long-only. Daily timeframe.",
+            "UNIVERSE BIAS: results reflect the CURRENT watchlist backtested over the "
+            "past — these are names selected with hindsight, so absolute returns are "
+            "optimistic. Trust relative comparisons more than absolute numbers.",
         ],
     }
 
 
-def _holdings_value(positions: dict[str, Any], date: Any, price_at) -> float:
+def _holdings_value(positions: dict[str, Any], date: Any, mark_price) -> float:
     total = 0.0
     for sym, pos in positions.items():
-        cl = price_at(sym, date, "Close")
+        cl = mark_price(sym, date)
         if cl is not None:
             total += pos["shares"] * cl
     return total
@@ -470,13 +552,16 @@ def _metrics(start: float, end: float, curve: list[dict], trades: list[dict], ye
 
 
 def _benchmark(spy, calendar_bt: list) -> dict[str, Any]:
-    import pandas as pd
-
+    # Use the first/last VALID close within the window — the raw last session can
+    # carry a NaN (forming/partial bar), which previously nulled the benchmark.
     try:
-        first = float(spy["Close"].loc[calendar_bt[0]])
-        last = float(spy["Close"].loc[calendar_bt[-1]])
+        close = spy["Close"].reindex(calendar_bt).dropna()
     except (KeyError, ValueError):
         return {}
-    if not first or pd.isna(first) or pd.isna(last):
+    if len(close) < 2:
+        return {}
+    first = float(close.iloc[0])
+    last = float(close.iloc[-1])
+    if not first:
         return {}
     return {"buy_hold_return_pct": round((last / first - 1) * 100.0, 2)}
