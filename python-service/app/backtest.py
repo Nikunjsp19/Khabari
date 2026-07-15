@@ -318,9 +318,14 @@ def run_backtest(
             hi = price_at(sym, date, "High")
             lo = price_at(sym, date, "Low")
             cl = price_at(sym, date, "Close")
-            atr = price_at(sym, date, "ATR")
             if cl is None:
                 continue
+            # Prior session's ATR for the stop (today's ATR needs today's range)
+            atr = None
+            _i = pos_index.get(sym, {}).get(date)
+            if _i is not None and _i > 0:
+                _v = frames[sym]["ATR"].iloc[_i - 1]
+                atr = None if pd.isna(_v) else float(_v)
 
             entry_price = pos["entry_price"]
             # Use the high-water mark as of the PRIOR session for today's stop —
