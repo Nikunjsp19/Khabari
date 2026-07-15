@@ -141,6 +141,8 @@ def root() -> dict[str, Any]:
             "GET /regime",
             "GET /signals",
             "GET /backtest",
+            "GET /tilt/plan",
+            "POST /tilt/rebalance",
             "GET /exits/check",
             "POST /exits/run",
             "POST /analyze",
@@ -316,6 +318,25 @@ def backtest(
     if not include_trades:
         result.pop("trades", None)
     return result
+
+
+@app.get("/tilt/plan")
+def tilt_plan(rebalance: bool = Query(True)) -> dict[str, Any]:
+    """Preview the momentum-tilt target portfolio + trades — no writes, no spend."""
+    from app.tilt import compute_tilt_plan
+
+    return serialize_mongo(compute_tilt_plan(rebalance=rebalance))
+
+
+@app.post("/tilt/rebalance")
+def tilt_rebalance(force: bool = True, send: bool = True) -> dict[str, Any]:
+    """Run the momentum-tilt engine now; emits BUY/SELL recs to confirm in Hisaab.
+
+    force=true does a full rebalance regardless of the monthly cadence.
+    """
+    from app.tilt import run_tilt_rebalance
+
+    return serialize_mongo(run_tilt_rebalance(force=force, send_notification=send))
 
 
 @app.get("/exits/check")

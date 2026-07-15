@@ -419,6 +419,47 @@ def _position_monitor_job() -> None:
         _last_position_check = {"ok": False, "error": str(exc), "status": status}
 
 
+_last_tilt_run: dict[str, Any] | None = None
+
+
+def _tilt_job() -> None:
+    """Momentum-tilt engine: monthly rebalance + daily 200d trend-brake SELLs.
+
+    Runs during market hours, no LLM spend. Idempotent per month (the engine
+    tracks the last rebalance month), so extra ticks just do the trend-brake
+    check. Emits standard BUY/SELL recommendations you confirm in Hisaab.
+    """
+    global _last_tilt_run
+    status = market_hours_status()
+    if not is_market_hours():
+        _last_tilt_run = {"skipped": True, "reason": "outside_market_hours", "status": status}
+        return
+    try:
+        from app.tilt import run_tilt_rebalance
+
+        result = run_tilt_rebalance(send_notification=True)
+        _last_tilt_run = {"status": status, **result}
+        if result.get("emitted"):
+            logger.info(
+                "Tilt job: %s (%s trades) — %s",
+                "REBALANCE" if result.get("rebalance") else "trend-brake",
+                len(result.get("emitted") or []),
+                [e.get("ticker") for e in (result.get("emitted") or [])],
+            )
+        else:
+            logger.info("Tilt job: nothing to do (rebalance=%s)", result.get("rebalance"))
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Tilt job failed")
+        _last_tilt_run = {"ok": False, "error": str(exc), "status": status}
+
+
+def trigger_tilt_now(force: bool = True) -> dict[str, Any]:
+    """Run the tilt engine immediately (API/ops)."""
+    from app.tilt import run_tilt_rebalance
+
+    return run_tilt_rebalance(force=force, send_notification=True)
+
+
 def _day_wrap_job() -> None:
     """Mon–Fri after the close: push concluding news + today's suggestions."""
     global _last_day_wrap
@@ -474,40 +515,61 @@ def start_scheduler() -> BackgroundScheduler | None:
         backup_hours.insert(0, settings.market_start_hour)
     backup_hour_expr = ",".join(str(h) for h in sorted(set(backup_hours)))
 
-    sched.add_job(
-        _backup_job,
-        CronTrigger(
-            day_of_week="mon-fri",
-            hour=backup_hour_expr,
-            minute=0,
-            timezone=settings.market_timezone,
-        ),
-        id="khabari_backup_analyze",
-        replace_existing=True,
-    )
+    if settings.tilt_enabled:
+        # Momentum tilt is the primary stock engine: it replaces the LLM
+        # buy/sell-timing analyze (backup + news-triggered) AND the ATR exit
+        # engine, because the tilt has its own monthly rebalance + trend brake.
+        # Run a few times across the session so a mid-session start / VM wake
+        # still triggers the monthly rebalance and the daily trend-brake check.
+        tilt_hours = sorted(
+            {settings.market_start_hour, (settings.market_start_hour + settings.market_end_hour) // 2}
+        )
+        sched.add_job(
+            _tilt_job,
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour=",".join(str(h) for h in tilt_hours),
+                minute=5,
+                timezone=settings.market_timezone,
+            ),
+            id="khabari_tilt",
+            replace_existing=True,
+        )
+    else:
+        sched.add_job(
+            _backup_job,
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour=backup_hour_expr,
+                minute=0,
+                timezone=settings.market_timezone,
+            ),
+            id="khabari_backup_analyze",
+            replace_existing=True,
+        )
 
-    sched.add_job(
-        _news_scan_job,
-        CronTrigger(
-            day_of_week="mon-fri",
-            hour=hour_window,
-            minute=_cron_minute_expr(settings.news_scan_minutes, minimum=5),
-            timezone=settings.market_timezone,
-        ),
-        id="khabari_news_scan",
-        replace_existing=True,
-    )
-    sched.add_job(
-        _position_monitor_job,
-        CronTrigger(
-            day_of_week="mon-fri",
-            hour=hour_window,
-            minute=_cron_minute_expr(settings.position_monitor_minutes, minimum=15),
-            timezone=settings.market_timezone,
-        ),
-        id="khabari_position_monitor",
-        replace_existing=True,
-    )
+        sched.add_job(
+            _news_scan_job,
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour=hour_window,
+                minute=_cron_minute_expr(settings.news_scan_minutes, minimum=5),
+                timezone=settings.market_timezone,
+            ),
+            id="khabari_news_scan",
+            replace_existing=True,
+        )
+        sched.add_job(
+            _position_monitor_job,
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour=hour_window,
+                minute=_cron_minute_expr(settings.position_monitor_minutes, minimum=15),
+                timezone=settings.market_timezone,
+            ),
+            id="khabari_position_monitor",
+            replace_existing=True,
+        )
 
     if settings.day_wrap_enabled:
         sched.add_job(
@@ -580,12 +642,15 @@ def start_scheduler() -> BackgroundScheduler | None:
     # If we start mid-session (or wake from sleep), don't wait for the next cron tick
     if is_market_hours():
         sched.add_job(
-            _backup_job,
+            _tilt_job if settings.tilt_enabled else _backup_job,
             id="khabari_startup_catchup",
             replace_existing=True,
             misfire_grace_time=900,
         )
-        logger.info("Queued startup catch-up analyze (market is open)")
+        logger.info(
+            "Queued startup catch-up %s (market is open)",
+            "tilt rebalance" if settings.tilt_enabled else "analyze",
+        )
 
     # If we start after the wrap time on a weekday, still send today's wrap once
     if settings.day_wrap_enabled:
@@ -635,6 +700,7 @@ def scheduler_status() -> dict[str, Any]:
         "window": market_hours_status(),
         "jobs": jobs,
         "last_run": _last_run,
+        "last_tilt_run": _last_tilt_run,
         "last_news_scan": _last_news_scan,
         "last_position_check": _last_position_check,
         "last_day_wrap": _last_day_wrap,
@@ -672,6 +738,10 @@ def scheduler_status() -> dict[str, Any]:
             "exit_trail_atr_mult": settings.exit_trail_atr_mult,
             "exit_initial_stop_atr_mult": settings.exit_initial_stop_atr_mult,
             "exit_time_stop_days": settings.exit_time_stop_days,
+            "tilt_enabled": settings.tilt_enabled,
+            "tilt_top_n": settings.tilt_top_n,
+            "tilt_rebalance_band_pct": settings.tilt_rebalance_band_pct,
+            "tilt_require_uptrend": settings.tilt_require_uptrend,
         },
         "budget": budget_status(),
     }

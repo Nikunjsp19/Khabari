@@ -73,6 +73,25 @@ class Settings(BaseSettings):
     regime_vix_risk_off: float = 30.0  # >= this → risk-off
     regime_block_buys_in_risk_off: bool = True
 
+    # --- Momentum-tilt engine (primary stock strategy; beats the timing engine) ---
+    # Stays fully invested in the top-N momentum names, rebalanced monthly, with a
+    # 200d-SMA trend brake. Validated vs SPY in app/backtest.py::run_tilt_backtest.
+    # When enabled it REPLACES the LLM buy/sell-timing analyze + ATR exit engine for
+    # stocks (same notify → manual trade → confirm-in-Hisaab workflow). Set
+    # TILT_ENABLED=false to fall back to the old LLM/exit engine.
+    tilt_enabled: bool = True
+    tilt_top_n: int = 10                    # equal-weight slots
+    tilt_require_uptrend: bool = True       # only hold names above their 200d SMA
+    tilt_require_positive_momentum: bool = True  # and with positive 12-1 momentum
+    tilt_rebalance_band_pct: float = 0.25   # only trim/add a hold when it drifts > this
+    tilt_min_trade_usd: float = 20.0        # skip dust trades below this
+    # Ranking universe (comma-separated). Empty → use the active watchlist.
+    tilt_universe: str = (
+        "AAPL,MSFT,GOOGL,AMZN,META,NVDA,AVGO,ORCL,ADBE,CRM,AMD,QCOM,TXN,INTC,MU,"
+        "COST,WMT,HD,MCD,NKE,SBUX,PG,KO,PEP,JPM,BAC,V,MA,GS,UNH,JNJ,LLY,ABBV,MRK,"
+        "CAT,GE,XOM,CVX,NFLX,DIS,TSLA,LIN,HON"
+    )
+
     # --- Deterministic exit engine (ATR trailing / initial / time stops) ---
     # Trend-following exits set to DEFENSIBLE STANDARDS, not backtest-optimized
     # values (optimizing on a hindsight-selected watchlist overfits). Chandelier

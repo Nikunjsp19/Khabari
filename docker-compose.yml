@@ -49,7 +49,15 @@ services:
       REGIME_VIX_CAUTION: ${REGIME_VIX_CAUTION:-20}
       REGIME_VIX_RISK_OFF: ${REGIME_VIX_RISK_OFF:-30}
       REGIME_BLOCK_BUYS_IN_RISK_OFF: ${REGIME_BLOCK_BUYS_IN_RISK_OFF:-true}
-      # Deterministic exit engine (ATR trailing / initial / time stops)
+      # Momentum-tilt engine (primary stock strategy; replaces LLM timing + ATR exits when on)
+      TILT_ENABLED: ${TILT_ENABLED:-true}
+      TILT_TOP_N: ${TILT_TOP_N:-10}
+      TILT_REQUIRE_UPTREND: ${TILT_REQUIRE_UPTREND:-true}
+      TILT_REQUIRE_POSITIVE_MOMENTUM: ${TILT_REQUIRE_POSITIVE_MOMENTUM:-true}
+      TILT_REBALANCE_BAND_PCT: ${TILT_REBALANCE_BAND_PCT:-0.25}
+      TILT_MIN_TRADE_USD: ${TILT_MIN_TRADE_USD:-20}
+      TILT_UNIVERSE: ${TILT_UNIVERSE:-}
+      # Deterministic exit engine (ATR trailing / initial / time stops) — used only when TILT_ENABLED=false
       EXIT_ENGINE_ENABLED: ${EXIT_ENGINE_ENABLED:-true}
       EXIT_INITIAL_STOP_ATR_MULT: ${EXIT_INITIAL_STOP_ATR_MULT:-2.0}
       EXIT_TRAIL_ATR_MULT: ${EXIT_TRAIL_ATR_MULT:-3.0}
