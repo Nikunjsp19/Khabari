@@ -28,7 +28,7 @@ from app.db import (
     set_watchlist,
 )
 from app.desk import DESK_HTML
-from app.indicators import compute_indicators, compute_indicators_batch
+from app.indicators import compute_daily_context_batch, compute_indicators, compute_indicators_batch
 from app.llm import LLMError
 from app.market_hours import is_market_hours, market_hours_status
 from app.options_pipeline import run_options_analysis
@@ -138,6 +138,10 @@ def root() -> dict[str, Any]:
             "GET /schedule",
             "POST /day-wrap",
             "GET /indicators?symbols=TSLA,NVDA",
+            "GET /regime",
+            "GET /signals",
+            "GET /exits/check",
+            "POST /exits/run",
             "POST /analyze",
             "GET /portfolio",
             "GET /portfolio/marked",
@@ -228,6 +232,61 @@ def budget_clear_pause() -> dict[str, Any]:
 @app.get("/portfolio/marked")
 def portfolio_marked() -> dict[str, Any]:
     return serialize_mongo(portfolio_with_marks())
+
+
+@app.get("/regime")
+def regime() -> dict[str, Any]:
+    """Current broad-market regime (SPY vs 200d SMA + VIX)."""
+    from app.signals import market_regime
+
+    return market_regime(force=True)
+
+
+@app.get("/signals")
+def signals(
+    symbols: str = Query("", description="Comma-separated tickers (default: watchlist)"),
+    period: str = Query(""),
+    interval: str = Query(""),
+) -> dict[str, Any]:
+    """Deterministic quant signals + short-list preview — no LLM, no spend."""
+    from app.signals import market_regime, score_universe, select_candidates
+
+    settings = get_settings()
+    tickers = [s.strip().upper() for s in symbols.split(",") if s.strip()] or get_active_watchlist()
+    ind = compute_indicators_batch(
+        tickers,
+        period=period or settings.analyze_period,
+        interval=interval or settings.analyze_interval,
+    )
+    daily_ctx = compute_daily_context_batch(list(ind["indicators"].keys()))
+    scores = score_universe(ind["indicators"], daily_ctx)
+    held = list((get_latest_portfolio().get("positions") or {}).keys())
+    selection = select_candidates(scores, held)
+    ranked = sorted(scores.items(), key=lambda kv: float(kv[1].get("score") or 0), reverse=True)
+    return {
+        "regime": market_regime(),
+        "candidates": selection.get("buy_candidates"),
+        "shortlist": selection.get("symbols"),
+        "signals": {t: s for t, s in ranked},
+        "daily_context": daily_ctx,
+        "errors": ind.get("errors", {}),
+    }
+
+
+@app.get("/exits/check")
+def exits_check() -> dict[str, Any]:
+    """Preview the deterministic exit engine against open positions (no alerts sent)."""
+    from app.exits import evaluate_exits
+
+    return serialize_mongo(evaluate_exits())
+
+
+@app.post("/exits/run")
+def exits_run(send: bool = True) -> dict[str, Any]:
+    """Run the exit engine now; fires decisive SELL alerts on stop/target/time hits."""
+    from app.exits import run_exit_monitor
+
+    return serialize_mongo(run_exit_monitor(send_notification=send))
 
 
 @app.get("/recommendations/pending")

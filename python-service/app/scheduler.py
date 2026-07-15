@@ -375,24 +375,47 @@ def _news_scan_job() -> None:
 
 
 def _position_monitor_job() -> None:
-    """If open positions hit take-profit / stop-loss bands, trigger an analyze."""
+    """Deterministic exit engine: fire decisive SELL alerts on stop/target/time hits.
+
+    Unlike the old band check (which only woke the LLM), the exit engine sends a
+    concrete SELL recommendation the user can confirm — no LLM spend required.
+    """
     global _last_position_check
     status = market_hours_status()
     if not is_market_hours():
         _last_position_check = {"skipped": True, "reason": "outside_market_hours", "status": status}
         return
 
+    settings = get_settings()
+    if not settings.exit_engine_enabled:
+        try:
+            review = positions_need_review()
+            _last_position_check = {"ok": True, "status": status, **review}
+            if not review.get("needed"):
+                logger.info("Position monitor: no exit bands hit")
+                return
+            logger.info("Position monitor trigger: %s", review.get("reasons"))
+            _last_position_check["analyze"] = _maybe_analyze("position_monitor")
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Position monitor failed")
+            _last_position_check = {"ok": False, "error": str(exc), "status": status}
+        return
+
     try:
-        review = positions_need_review()
-        _last_position_check = {"ok": True, "status": status, **review}
-        if not review.get("needed"):
-            logger.info("Position monitor: no exit bands hit")
+        from app.exits import run_exit_monitor
+
+        result = run_exit_monitor(send_notification=True)
+        _last_position_check = {"ok": True, "status": status, **result}
+        if not result.get("needed"):
+            logger.info("Exit engine: no stops/targets hit (%s positions)", result.get("positions"))
             return
-        logger.info("Position monitor trigger: %s", review.get("reasons"))
-        analyze_result = _maybe_analyze("position_monitor")
-        _last_position_check["analyze"] = analyze_result
+        logger.info(
+            "Exit engine fired %s SELL alert(s): %s",
+            len(result.get("alerted") or []),
+            [a.get("ticker") for a in (result.get("alerted") or [])],
+        )
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Position monitor failed")
+        logger.exception("Exit engine failed")
         _last_position_check = {"ok": False, "error": str(exc), "status": status}
 
 
@@ -642,6 +665,13 @@ def scheduler_status() -> dict[str, Any]:
             "options_mover_top_n": settings.options_mover_top_n,
             "options_mover_min_abs_pct": settings.options_mover_min_abs_pct,
             "options_data_source": "yfinance",
+            "signal_buy_threshold": settings.signal_buy_threshold,
+            "signal_shortlist_size": settings.signal_shortlist_size,
+            "regime_block_buys_in_risk_off": settings.regime_block_buys_in_risk_off,
+            "exit_engine_enabled": settings.exit_engine_enabled,
+            "exit_trail_atr_mult": settings.exit_trail_atr_mult,
+            "exit_initial_stop_atr_mult": settings.exit_initial_stop_atr_mult,
+            "exit_time_stop_days": settings.exit_time_stop_days,
         },
         "budget": budget_status(),
     }

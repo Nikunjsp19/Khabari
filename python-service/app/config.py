@@ -19,9 +19,9 @@ class Settings(BaseSettings):
     # LLM — Gemini is default
     llm_provider: str = "gemini"
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-3.5-flash"
+    gemini_model: str = "gemini-3.1-flash-lite"
     # Comma-separated fallbacks used immediately on 503/overload (same analyze run)
-    gemini_fallback_models: str = "gemini-3.1-flash-lite,gemini-flash-latest"
+    gemini_fallback_models: str = "gemini-2.5-flash-lite,gemini-flash-latest"
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
 
@@ -49,6 +49,32 @@ class Settings(BaseSettings):
     position_stop_loss_pct: float = 3.5
     analyze_period: str = "5d"
     analyze_interval: str = "15m"
+
+    # --- Deterministic signal engine (quant layer that gates the LLM) ---
+    # Score (0-100) a ticker must clear to be flagged BUY by the quant engine.
+    signal_buy_threshold: float = 60.0
+    # Minimum score to even reach the LLM short-list (candidates worth confirming).
+    signal_candidate_min_score: float = 55.0
+    # How many pre-screened candidates to hand the LLM per run (held names extra).
+    signal_shortlist_size: int = 6
+    # If the quant engine + regime find nothing and no positions are held, skip
+    # the LLM entirely and record a deterministic HOLD (saves spend on quiet days).
+    signal_skip_llm_when_no_candidates: bool = True
+
+    # --- Market regime filter (SPY trend + VIX) ---
+    regime_index_symbol: str = "SPY"
+    regime_vix_symbol: str = "^VIX"
+    regime_vix_caution: float = 20.0   # >= this → neutral (trim size)
+    regime_vix_risk_off: float = 30.0  # >= this → risk-off
+    regime_block_buys_in_risk_off: bool = True
+
+    # --- Deterministic exit engine (ATR trailing / initial / time stops) ---
+    exit_engine_enabled: bool = True
+    exit_initial_stop_atr_mult: float = 2.0   # initial hard stop = entry - N*ATR(14d)
+    exit_trail_atr_mult: float = 3.0          # Chandelier trailing = high_water - N*ATR(14d)
+    exit_time_stop_days: int = 5              # 0 disables; sell stagnant trades after N days
+    exit_time_stop_min_profit_pct: float = 1.0  # only time-stop if below this P&L
+    exit_alert_cooldown_minutes: float = 60.0  # re-alert the same exit at most this often
     # End-of-day wrap (Mon–Fri) — concluding news + suggestions summary
     day_wrap_enabled: bool = True
     day_wrap_hour: int = 16

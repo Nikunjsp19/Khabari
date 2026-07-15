@@ -157,3 +157,138 @@ def compute_indicators_batch(
             errors[symbol.upper()] = str(exc)
 
     return {"indicators": results, "errors": errors}
+
+
+def _daily_indicator_row(sub: "pd.DataFrame") -> dict[str, Any] | None:
+    """Compute a daily-timeframe context row from one ticker's OHLCV frame."""
+    if sub is None or sub.empty:
+        return None
+    sub = sub.dropna(how="all")
+    if "Close" not in sub.columns:
+        return None
+    close = sub["Close"].dropna()
+    if close.empty:
+        return None
+    high, low, vol = sub["High"], sub["Low"], sub.get("Volume")
+    n = len(close)
+    price = _latest_scalar(close)
+
+    def _tail_mean(series: pd.Series, length: int) -> float | None:
+        s = series.dropna()
+        return float(s.tail(length).mean()) if len(s) >= max(20, length // 2) else None
+
+    sma50 = _tail_mean(close, 50)
+    sma200 = _tail_mean(close, 200)
+    ema50 = _latest_scalar(ta.ema(close, length=50)) if n >= 50 else None
+    ema200 = _latest_scalar(ta.ema(close, length=200)) if n >= 200 else None
+    rsi = _latest_scalar(ta.rsi(close, length=14)) if n >= 15 else None
+    atr = _latest_scalar(ta.atr(high, low, close, length=14)) if n >= 15 else None
+
+    adx = plus_di = minus_di = None
+    if n >= 20:
+        adx_df = ta.adx(high, low, close, length=14)
+        if adx_df is not None and not adx_df.empty:
+            adx = _latest_scalar(adx_df.get(next((c for c in adx_df.columns if c.startswith("ADX_")), ""), None))
+            plus_di = _latest_scalar(adx_df.get(next((c for c in adx_df.columns if c.startswith("DMP_")), ""), None))
+            minus_di = _latest_scalar(adx_df.get(next((c for c in adx_df.columns if c.startswith("DMN_")), ""), None))
+
+    rel_volume = None
+    last_vol = None
+    if vol is not None and not vol.dropna().empty:
+        v = vol.dropna()
+        last_vol = float(v.iloc[-1])
+        avg20 = float(v.tail(20).mean()) if len(v) >= 5 else None
+        if avg20 and avg20 > 0:
+            rel_volume = round(last_vol / avg20, 2)
+
+    above_sma200 = None
+    dist_sma200_pct = None
+    if price is not None and sma200:
+        above_sma200 = price >= sma200
+        dist_sma200_pct = round((price - sma200) / sma200 * 100, 2)
+
+    # Trailing total returns (~21 trading days/month) for cross-sectional momentum.
+    def _ret(lookback: int) -> float | None:
+        s = close.dropna()
+        if len(s) <= lookback:
+            return None
+        past = float(s.iloc[-1 - lookback])
+        if past <= 0:
+            return None
+        return round((float(s.iloc[-1]) / past - 1) * 100, 2)
+
+    # Jegadeesh & Titman (1993) convention: 12-month return skipping the most
+    # recent month to avoid short-term reversal noise ("12-1 momentum").
+    mom_12_1 = None
+    s_close = close.dropna()
+    if len(s_close) >= 252:
+        start = float(s_close.iloc[-252])
+        end = float(s_close.iloc[-22])
+        if start > 0:
+            mom_12_1 = round((end / start - 1) * 100, 2)
+
+    return {
+        "price": _round(price),
+        "sma50": _round(sma50),
+        "sma200": _round(sma200),
+        "ema50": _round(ema50),
+        "ema200": _round(ema200),
+        "rsi": _round(rsi, 2),
+        "atr": _round(atr, 4),
+        "adx": _round(adx, 2),
+        "plus_di": _round(plus_di, 2),
+        "minus_di": _round(minus_di, 2),
+        "rel_volume": rel_volume,
+        "above_sma200": above_sma200,
+        "dist_sma200_pct": dist_sma200_pct,
+        "ret_1m": _ret(21),
+        "ret_3m": _ret(63),
+        "ret_6m": _ret(126),
+        "ret_12m": _ret(252),
+        "mom_12_1": mom_12_1,
+        "bars": n,
+    }
+
+
+def compute_daily_context_batch(symbols: list[str], period: str = "1y") -> dict[str, Any]:
+    """Daily-timeframe context (SMA200/EMA/ADX/ATR/relative-volume) for the trend filter.
+
+    One batched yfinance download for the whole watchlist keeps this cheap. Daily
+    bars give an accurate 200-day trend anchor that the intraday 15m/5d window
+    cannot (EMA200 needs 200 bars). Fails open per ticker.
+    """
+    symbols = [s.upper().strip() for s in symbols if s and s.strip()]
+    out: dict[str, Any] = {}
+    if not symbols:
+        return out
+    try:
+        df = yf.download(
+            symbols,
+            period=period,
+            interval="1d",
+            progress=False,
+            auto_adjust=True,
+            threads=False,
+            group_by="ticker",
+        )
+    except Exception:  # noqa: BLE001
+        logger.warning("Daily context batch download failed", exc_info=True)
+        return out
+    if df is None or df.empty:
+        return out
+
+    multi = isinstance(df.columns, pd.MultiIndex)
+    for sym in symbols:
+        try:
+            if multi:
+                if sym not in df.columns.get_level_values(0):
+                    continue
+                sub = df[sym]
+            else:
+                sub = df  # single-ticker download → flat columns
+            row = _daily_indicator_row(sub)
+            if row:
+                out[sym] = row
+        except Exception:  # noqa: BLE001
+            logger.warning("Daily context failed for %s", sym, exc_info=True)
+    return out
