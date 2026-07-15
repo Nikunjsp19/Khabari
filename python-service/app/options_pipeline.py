@@ -20,12 +20,91 @@ from app.llm import run_options_decision_agent, run_options_news_agent, run_opti
 from app.news import fetch_news_batch, headlines_by_ticker
 from app.news_watch import mark_analyze_ran
 from app.notify import format_options_recommendation_message, notify_options_recommendation
-from app.options_data import deep_scan_underlyings
+from app.options_data import CONTRACT_MULTIPLIER, deep_scan_underlyings, fetch_contract_quote
 from app.options_movers import refresh_options_watchlist_from_movers
 from app.options_risk import apply_options_risk_rules
 from app.options_trades import options_portfolio_with_marks
 
 logger = logging.getLogger(__name__)
+
+
+def _refresh_live_premium(final: dict[str, Any]) -> dict[str, Any]:
+    """Re-quote the chosen contract from Yahoo right before we notify / save.
+
+    Option premiums move fast; the mid captured during the deep scan can already
+    be stale by the time Gemini finishes. For BUY_TO_OPEN we price at the live
+    *ask* (what you typically pay to open), not the mid, so the suggested dollar
+    amount is not optimistically low.
+    """
+    action = str(final.get("action") or "").upper()
+    if action not in {"BUY_TO_OPEN", "SELL_TO_CLOSE"}:
+        return final
+    ticker = str(final.get("ticker") or "").upper()
+    right = final.get("right")
+    strike = final.get("strike")
+    expiry = final.get("expiry")
+    if not ticker or not right or strike is None or not expiry:
+        return final
+
+    contract = {
+        "underlying": ticker,
+        "right": right,
+        "strike": float(strike),
+        "expiry": str(expiry),
+        "key": final.get("contract_key"),
+        "osi": final.get("osi"),
+    }
+    live = fetch_contract_quote(str(final.get("osi") or ticker), contract=contract)
+    if not live or not live.get("mid"):
+        final.setdefault("risk_notes", []).append(
+            "Could not refresh live Yahoo quote — premium may be stale"
+        )
+        return final
+
+    bid = live.get("bid")
+    ask = live.get("ask")
+    mid = float(live["mid"])
+    old = float(final.get("premium") or 0)
+    if action == "BUY_TO_OPEN":
+        # Prefer ask when available — mid underestimates what you'll pay.
+        premium = float(ask) if ask and float(ask) > 0 else mid
+        quote_basis = "ask" if ask and float(ask) > 0 else "mid"
+    else:
+        premium = float(bid) if bid and float(bid) > 0 else mid
+        quote_basis = "bid" if bid and float(bid) > 0 else "mid"
+
+    contracts = float(final.get("contracts") or 0)
+    final["premium"] = round(premium, 4)
+    final["bid"] = bid
+    final["ask"] = ask
+    final["mid"] = mid
+    final["quote_basis"] = quote_basis
+    final["quoted_premium_scan"] = old or None
+    if contracts >= 1 and premium > 0:
+        dollars = round(premium * CONTRACT_MULTIPLIER * contracts, 2)
+        final["investment"] = dollars
+        if action == "BUY_TO_OPEN":
+            final["max_loss"] = dollars
+    notes = list(final.get("risk_notes") or [])
+    if old and abs(premium - old) / max(old, 1e-6) >= 0.05:
+        notes.append(
+            f"Live Yahoo refresh: scan mid ${old:.3f} → {quote_basis} ${premium:.3f} "
+            f"(bid={bid} ask={ask})"
+        )
+    final["risk_notes"] = notes
+    logger.info(
+        "Options premium refresh %s %s %s %s: scan=%.4f live_%s=%.4f bid=%s ask=%s",
+        action,
+        ticker,
+        strike,
+        expiry,
+        old,
+        quote_basis,
+        premium,
+        bid,
+        ask,
+    )
+    return final
 
 
 def run_options_analysis(
@@ -198,6 +277,8 @@ def run_options_analysis(
         candidates=candidates_flat,
     )
     final = apply_options_confidence_gate(final)
+    # Premium moves while Gemini runs — re-quote Yahoo before we notify.
+    final = _refresh_live_premium(final)
     if "ranked" in decision:
         final["ranked"] = decision.get("ranked")
 

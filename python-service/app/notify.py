@@ -82,12 +82,28 @@ def format_options_recommendation_message(
     expiry = rec.get("expiry")
     contracts = rec.get("contracts")
     premium = rec.get("premium")
+    bid = rec.get("bid")
+    ask = rec.get("ask")
+    mid = rec.get("mid")
     max_loss = rec.get("max_loss")
+    quote_basis = rec.get("quote_basis") or "mid"
     contract_line = (
-        f"{rec.get('ticker')} {right} ${strike} exp {expiry} × {contracts} @ ${premium}"
+        f"{rec.get('ticker')} {right} ${strike} exp {expiry} × {contracts}"
         if right and strike is not None
         else f"{rec.get('action')} {rec.get('ticker')}"
     )
+    if bid is not None and ask is not None:
+        quote_line = (
+            f"Live quote: bid ${bid} / ask ${ask}"
+            + (f" / mid ${mid}" if mid is not None else "")
+            + f" — priced at {quote_basis} ${premium} "
+            f"(${rec.get('investment')} for {contracts} ct). Buys usually fill near ask."
+        )
+    else:
+        quote_line = (
+            f"Premium ({quote_basis}): ${premium} → ${rec.get('investment')} "
+            f"for {contracts} contract(s). Re-check live ask before you trade."
+        )
     sync_line = f"\n\nAfter you trade, confirm on Options desk:\n{desk}"
 
     if markdown:
@@ -95,7 +111,8 @@ def format_options_recommendation_message(
         return (
             "🚨 *Options Recommendation*\n\n"
             f"*{rec.get('action')}* — {contract_line}\n"
-            f"Premium at risk / proceeds: ${rec.get('investment')} · Max loss: ${max_loss}\n"
+            f"{quote_line}\n"
+            f"Max loss: ${max_loss}\n"
             f"Confidence: {rec.get('confidence')}% · Risk: {rec.get('risk')}\n\n"
             f"*Reasons:*\n{bullets}\n\n"
             f"Horizon: {rec.get('time_horizon')}\n"
@@ -108,7 +125,8 @@ def format_options_recommendation_message(
     return (
         "Options Recommendation\n\n"
         f"{rec.get('action')} — {contract_line}\n"
-        f"Premium at risk / proceeds: ${rec.get('investment')} · Max loss: ${max_loss}\n"
+        f"{quote_line}\n"
+        f"Max loss: ${max_loss}\n"
         f"Confidence: {rec.get('confidence')}% · Risk: {rec.get('risk')}\n\n"
         f"Reasons:\n{bullets}\n\n"
         f"Horizon: {rec.get('time_horizon')}\n"
