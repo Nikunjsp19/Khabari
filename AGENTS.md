@@ -44,3 +44,25 @@ test the Python service (Docker is not preinstalled on this VM).
 - The full analyze pipeline calls Gemini (LLM) and needs `GEMINI_API_KEY`; without
   it the pipeline fails at the LLM step. Risk/prompt/market-hours endpoints work
   without any API keys.
+
+### Scheduler / notifications gotcha (Mac + Docker)
+- Cron jobs live **inside** `khabari-python-api`. When the Mac sleeps, Docker
+  freezes and APScheduler ticks are missed — health checks can still look "up"
+  while no ntfy pings fire. A **watchdog** (`khabari_scheduler_watchdog`) runs
+  every ~10 minutes during the trade window and forces an options scan (and a
+  once-per-day tilt catch-up) if the last run is overdue. Misfire grace is ~2h.
+- **Stocks:** with `TILT_ENABLED=true`, hourly LLM stock analyze is off. You get
+  tilt pings only when there are rebalance/trend-brake trades (a few times a day
+  at most), not every hour. **Options** still scan ~hourly and notify on HOLD or
+  actionable BUY_TO_OPEN.
+- Keep the laptop awake during market hours (or prevent sleep) for best results;
+  the watchdog recovers after wake, but it cannot run while the VM is frozen.
+
+### Options chase / same-day extension (important)
+- A large same-day move (~**±2.5%+**, see `options_max_intraday_chase_pct`) is
+  **significant**. Buying calls after a big green day (or puts after a dump) is
+  often too optimistic because premium already prices much of the move.
+- The pipeline still **may suggest** the trade: `apply_options_chase_gate` adds a
+  chase caution, haircuts confidence, and bumps risk to HIGH — it does **not**
+  force HOLD. When advising the user, surface that caution clearly (live day % +
+  moneyness/DTE); don’t sell it as free leftover upside.

@@ -9,6 +9,7 @@ from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import get_settings
 from app.budget import budget_status, can_start_analyze, record_analyze
@@ -318,6 +319,83 @@ def _options_backup_job() -> None:
     _maybe_options_analyze("backup", force_cooldown=True)
 
 
+def _last_options_age_minutes() -> float | None:
+    """Minutes since last successful options analyze (wall clock)."""
+    run = _last_options_run
+    if not run or run.get("ok") is not True:
+        # Fall back to Mongo if process just restarted
+        try:
+            from app.db import get_latest_options_recommendation
+
+            doc = get_latest_options_recommendation()
+            ts = doc.get("ts") if doc else None
+            if ts is None:
+                return None
+            if getattr(ts, "tzinfo", None) is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            return (datetime.now(timezone.utc) - ts.astimezone(timezone.utc)).total_seconds() / 60.0
+        except Exception:  # noqa: BLE001
+            return None
+    status = run.get("status") or {}
+    now_s = status.get("now")
+    if not now_s:
+        return None
+    try:
+        # market_hours_status uses ISO local ET string
+        from app.market_hours import now_market
+
+        # Prefer elapsed vs wall clock: if status.now is stale, treat as old
+        stamped = datetime.fromisoformat(str(now_s))
+        if stamped.tzinfo is None:
+            stamped = stamped.replace(tzinfo=now_market().tzinfo)
+        return (now_market() - stamped).total_seconds() / 60.0
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _watchdog_job() -> None:
+    """Catch missed cron ticks after Docker/Mac sleep (no user babysitting)."""
+    settings = get_settings()
+    if not is_market_hours():
+        return
+
+    # Options: expect roughly every backup hour; catch up if overdue
+    if settings.options_scheduler_enabled:
+        max_age = max(
+            45.0,
+            float(settings.options_backup_analyze_hours) * 60.0
+            + float(settings.options_analyze_min_gap_minutes),
+        )
+        age = _last_options_age_minutes()
+        if age is None or age >= max_age:
+            logger.warning(
+                "Watchdog: options overdue (age=%.0fm, limit=%.0fm) — forcing backup analyze",
+                age if age is not None else -1,
+                max_age,
+            )
+            _maybe_options_analyze("watchdog", force_cooldown=True)
+
+    # Stocks (tilt): only a couple cron slots/day — if morning slot was missed, run once
+    if settings.tilt_enabled:
+        from app.market_hours import now_market
+
+        now = now_market()
+        tilt = _last_tilt_run
+        tilt_today = False
+        if tilt and tilt.get("ok") is not False:
+            stamped = (tilt.get("status") or {}).get("now")
+            try:
+                if stamped:
+                    tdt = datetime.fromisoformat(str(stamped))
+                    tilt_today = tdt.date() == now.date()
+            except Exception:  # noqa: BLE001
+                tilt_today = False
+        # After 9:30 ET, ensure at least one tilt pass today
+        if (now.hour, now.minute) >= (9, 30) and not tilt_today:
+            logger.warning("Watchdog: no tilt run yet today — forcing tilt job")
+            _tilt_job()
+
+
 def _options_position_monitor_job() -> None:
     global _last_options_position_check
     status = market_hours_status()
@@ -503,7 +581,10 @@ def start_scheduler() -> BackgroundScheduler | None:
     job_defaults = {
         "coalesce": True,
         "max_instances": 1,
-        "misfire_grace_time": 900,  # still run if woken ≤15 min late (Docker sleep)
+        # Docker Desktop on Mac freezes the VM when the laptop sleeps; cron
+        # ticks are then "missed". Allow a long catch-up window so wake still
+        # runs the overdue job instead of going silent until you restart.
+        "misfire_grace_time": max(900, int(settings.scheduler_misfire_grace_seconds)),
     }
     sched = BackgroundScheduler(timezone=settings.market_timezone, job_defaults=job_defaults)
     hour_window = f"{settings.market_start_hour}-{settings.market_end_hour}"
@@ -617,6 +698,15 @@ def start_scheduler() -> BackgroundScheduler | None:
             replace_existing=True,
         )
 
+    # Interval watchdog: self-heal when cron ticks were skipped after sleep
+    watchdog_mins = max(5, int(settings.scheduler_watchdog_minutes))
+    sched.add_job(
+        _watchdog_job,
+        IntervalTrigger(minutes=watchdog_mins, timezone=settings.market_timezone),
+        id="khabari_scheduler_watchdog",
+        replace_existing=True,
+    )
+
     sched.start()
     # Drop legacy job id from older deployments if it somehow exists
     try:
@@ -645,11 +735,22 @@ def start_scheduler() -> BackgroundScheduler | None:
             _tilt_job if settings.tilt_enabled else _backup_job,
             id="khabari_startup_catchup",
             replace_existing=True,
-            misfire_grace_time=900,
         )
         logger.info(
             "Queued startup catch-up %s (market is open)",
             "tilt rebalance" if settings.tilt_enabled else "analyze",
+        )
+        if settings.options_scheduler_enabled:
+            sched.add_job(
+                _options_backup_job,
+                id="khabari_options_startup_catchup",
+                replace_existing=True,
+            )
+            logger.info("Queued options startup catch-up (market is open)")
+        sched.add_job(
+            _watchdog_job,
+            id="khabari_watchdog_startup",
+            replace_existing=True,
         )
 
     # If we start after the wrap time on a weekday, still send today's wrap once
@@ -727,6 +828,8 @@ def scheduler_status() -> dict[str, Any]:
             "options_min_notify_confidence": settings.options_min_notify_confidence,
             "options_backup_analyze_hours": settings.options_backup_analyze_hours,
             "options_analyze_min_gap_minutes": settings.options_analyze_min_gap_minutes,
+            "scheduler_watchdog_minutes": settings.scheduler_watchdog_minutes,
+            "scheduler_misfire_grace_seconds": settings.scheduler_misfire_grace_seconds,
             "options_auto_movers": settings.options_auto_movers,
             "options_mover_top_n": settings.options_mover_top_n,
             "options_mover_min_abs_pct": settings.options_mover_min_abs_pct,

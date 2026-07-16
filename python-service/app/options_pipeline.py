@@ -14,7 +14,11 @@ from app.db import (
     save_options_recommendation,
     save_prices,
 )
-from app.gates import apply_options_confidence_gate, should_notify_options
+from app.gates import (
+    apply_options_chase_gate,
+    apply_options_confidence_gate,
+    should_notify_options,
+)
 from app.indicators import compute_indicators_batch
 from app.llm import run_options_decision_agent, run_options_news_agent, run_options_technical_agent
 from app.news import fetch_news_batch, headlines_by_ticker
@@ -26,6 +30,53 @@ from app.options_risk import apply_options_risk_rules
 from app.options_trades import options_portfolio_with_marks
 
 logger = logging.getLogger(__name__)
+
+
+def _day_moves_map(
+    symbols: list[str],
+    movers_meta: dict[str, Any] | None = None,
+) -> dict[str, float]:
+    """Same-day % vs prior close for chase gating (movers first, Yahoo chart fallback)."""
+    out: dict[str, float] = {}
+    if movers_meta:
+        for row in movers_meta.get("ranked") or []:
+            t = str(row.get("ticker") or "").upper()
+            if t and row.get("day_pct") is not None:
+                try:
+                    out[t] = float(row["day_pct"])
+                except (TypeError, ValueError):
+                    pass
+
+    missing = [s.upper() for s in symbols if s.upper() not in out]
+    if not missing:
+        return out
+
+    try:
+        import httpx
+    except ImportError:
+        return out
+
+    for ticker in missing:
+        try:
+            url = (
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+                f"?interval=1d&range=5d"
+            )
+            with httpx.Client(timeout=8.0, headers={"User-Agent": "Mozilla/5.0"}) as client:
+                resp = client.get(url)
+                resp.raise_for_status()
+                result = (resp.json().get("chart") or {}).get("result") or []
+                if not result:
+                    continue
+                meta = result[0].get("meta") or {}
+                px = meta.get("regularMarketPrice")
+                prev = meta.get("previousClose") or meta.get("chartPreviousClose")
+                if px is None or not prev:
+                    continue
+                out[ticker] = round((float(px) / float(prev) - 1.0) * 100.0, 3)
+        except Exception:  # noqa: BLE001
+            logger.debug("day_move fetch failed for %s", ticker, exc_info=True)
+    return out
 
 
 def _refresh_live_premium(final: dict[str, Any]) -> dict[str, Any]:
@@ -250,6 +301,13 @@ def run_options_analysis(
             }
         )
 
+    day_moves = _day_moves_map(list(indicators.keys()), movers_meta)
+    logger.info(
+        "Options day_moves (chase gate ±%.1f%%): %s",
+        float(settings.options_max_intraday_chase_pct),
+        {k: round(v, 2) for k, v in sorted(day_moves.items())},
+    )
+
     context = {
         "portfolio": {
             "cash": marked.get("cash"),
@@ -258,7 +316,9 @@ def run_options_analysis(
         },
         "mandate": (
             "SHORT-TERM long calls/puts only. Deep-validated liquid contracts. "
-            "Rank underlyings; take best when score>=60 else HOLD."
+            "Rank underlyings; take best when score>=60 else HOLD. "
+            "After large same-day moves (see day_moves), still ok to suggest but "
+            "with chase caution — lower confidence, not free upside."
         ),
         "trigger": trigger,
         "news": news_summary,
@@ -266,6 +326,8 @@ def run_options_analysis(
         "candidates": candidates_for_llm,
         "scan_errors": scan.get("errors") or {},
         "prices": spots,
+        "day_moves": day_moves,
+        "chase_limit_pct": float(settings.options_max_intraday_chase_pct),
     }
     decision = run_options_decision_agent(context)
 
@@ -277,6 +339,7 @@ def run_options_analysis(
         candidates=candidates_flat,
     )
     final = apply_options_confidence_gate(final)
+    final = apply_options_chase_gate(final, day_moves)
     # Premium moves while Gemini runs — re-quote Yahoo before we notify.
     final = _refresh_live_premium(final)
     if "ranked" in decision:
@@ -299,6 +362,7 @@ def run_options_analysis(
             "candidates": candidates_for_llm[:20],
             "scan_errors": scan.get("errors"),
             "trigger": trigger,
+            "day_moves": day_moves,
         },
     )
     from app.notify import _confirm_url

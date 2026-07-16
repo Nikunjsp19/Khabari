@@ -116,12 +116,19 @@ def format_options_recommendation_message(
 
     if markdown:
         bullets = "\n".join(f"• {r}" for r in reasons) or "• (none)"
+        chase = ""
+        if rec.get("chase_warned") and rec.get("day_pct") is not None:
+            chase = (
+                f"\n⚠️ Chase caution: underlying already {rec['day_pct']:+.2f}% today — "
+                "significant move; more continuation from here needed.\n"
+            )
         return (
             "🚨 *Options Recommendation*\n\n"
             f"*{rec.get('action')}* — {contract_line}\n"
             f"{quote_line}\n"
             f"Max loss: ${max_loss}\n"
-            f"Confidence: {rec.get('confidence')}% · Risk: {rec.get('risk')}\n\n"
+            f"Confidence: {rec.get('confidence')}% · Risk: {rec.get('risk')}"
+            f"{chase}\n"
             f"*Reasons:*\n{bullets}\n\n"
             f"Horizon: {rec.get('time_horizon')}\n"
             f"Expected: {rec.get('expected_return')}\n"
@@ -130,12 +137,19 @@ def format_options_recommendation_message(
         )
 
     bullets = "\n".join(f"• {r}" for r in reasons) or "• (none)"
+    chase = ""
+    if rec.get("chase_warned") and rec.get("day_pct") is not None:
+        chase = (
+            f"\nChase caution: underlying already {rec['day_pct']:+.2f}% today — "
+            "significant move; more continuation from here needed.\n"
+        )
     return (
         "Options Recommendation\n\n"
         f"{rec.get('action')} — {contract_line}\n"
         f"{quote_line}\n"
         f"Max loss: ${max_loss}\n"
-        f"Confidence: {rec.get('confidence')}% · Risk: {rec.get('risk')}\n\n"
+        f"Confidence: {rec.get('confidence')}% · Risk: {rec.get('risk')}"
+        f"{chase}\n"
         f"Reasons:\n{bullets}\n\n"
         f"Horizon: {rec.get('time_horizon')}\n"
         f"Expected: {rec.get('expected_return')}\n"

@@ -146,6 +146,10 @@ class Settings(BaseSettings):
     options_backup_analyze_hours: int = 1  # hourly during market window
     # Soft gap for options hourly job vs shared stock analyze cooldown
     options_analyze_min_gap_minutes: float = 20.0
+    # Self-heal when Docker/Mac sleep freezes APScheduler cron ticks
+    scheduler_watchdog_minutes: int = 10
+    # How late a cron/interval job may still run after wake (seconds)
+    scheduler_misfire_grace_seconds: int = 7200
     # Auto-pick high-movement underlyings into the options watchlist before each scan
     options_auto_movers: bool = True
     options_mover_top_n: int = 10
@@ -153,6 +157,11 @@ class Settings(BaseSettings):
     # Cap deep chain scans so options runs finish before Gemini timeouts
     options_analyze_max_symbols: int = 8
     options_max_candidates_for_llm: int = 15
+    # Soft caution (warn + confidence haircut) when underlying already moved hard today
+    # (calls: up ≥ pct; puts: down ≥ pct). Still suggests — does not force HOLD.
+    options_max_intraday_chase_pct: float = 2.5
+    # Soft caution only (do not block): subtract from confidence when chase fires
+    options_chase_confidence_haircut: float = 10.0
     # Split Gemini prompts into small batches to avoid read timeouts
     llm_ticker_batch_size: int = 3
     # Extra names always considered in the movers universe (comma-separated)
