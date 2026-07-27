@@ -17,6 +17,7 @@ from app.db import (
 from app.gates import (
     apply_options_chase_gate,
     apply_options_confidence_gate,
+    filter_chase_candidates,
     should_notify_options,
 )
 from app.indicators import compute_indicators_batch
@@ -236,6 +237,24 @@ def run_options_analysis(
     scan = deep_scan_underlyings(list(indicators.keys()), spots=spots)
     candidates_flat = list(scan.get("ranked") or [])
 
+    day_moves = _day_moves_map(list(indicators.keys()), movers_meta)
+    logger.info(
+        "Options day_moves (chase gate ±%.1f%%): %s",
+        float(settings.options_max_intraday_chase_pct),
+        {k: round(v, 2) for k, v in sorted(day_moves.items())},
+    )
+
+    chase_dropped: list[dict[str, Any]] = []
+    if settings.options_filter_chase_candidates:
+        candidates_flat, chase_dropped = filter_chase_candidates(
+            candidates_flat, day_moves
+        )
+        if chase_dropped:
+            logger.info(
+                "Filtered %d chase-direction candidates (calls after green / puts after red)",
+                len(chase_dropped),
+            )
+
     # Slim candidates for LLM
     candidates_for_llm = [
         {
@@ -301,13 +320,6 @@ def run_options_analysis(
             }
         )
 
-    day_moves = _day_moves_map(list(indicators.keys()), movers_meta)
-    logger.info(
-        "Options day_moves (chase gate ±%.1f%%): %s",
-        float(settings.options_max_intraday_chase_pct),
-        {k: round(v, 2) for k, v in sorted(day_moves.items())},
-    )
-
     context = {
         "portfolio": {
             "cash": marked.get("cash"),
@@ -317,8 +329,9 @@ def run_options_analysis(
         "mandate": (
             "SHORT-TERM long calls/puts only. Deep-validated liquid contracts. "
             "Rank underlyings; take best when score>=60 else HOLD. "
-            "After large same-day moves (see day_moves), still ok to suggest but "
-            "with chase caution — lower confidence, not free upside."
+            "NEVER chase large same-day moves (see day_moves / chase_limit_pct): "
+            "no calls after a big green day, no puts after a big red day — HOLD or "
+            "pick a non-chase setup instead."
         ),
         "trigger": trigger,
         "news": news_summary,
@@ -328,6 +341,7 @@ def run_options_analysis(
         "prices": spots,
         "day_moves": day_moves,
         "chase_limit_pct": float(settings.options_max_intraday_chase_pct),
+        "chase_candidates_filtered": len(chase_dropped),
     }
     decision = run_options_decision_agent(context)
 

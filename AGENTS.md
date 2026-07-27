@@ -61,8 +61,8 @@ test the Python service (Docker is not preinstalled on this VM).
 ### Options chase / same-day extension (important)
 - A large same-day move (~**±2.5%+**, see `options_max_intraday_chase_pct`) is
   **significant**. Buying calls after a big green day (or puts after a dump) is
-  often too optimistic because premium already prices much of the move.
-- The pipeline still **may suggest** the trade: `apply_options_chase_gate` adds a
-  chase caution, haircuts confidence, and bumps risk to HIGH — it does **not**
-  force HOLD. When advising the user, surface that caution clearly (live day % +
-  moneyness/DTE); don’t sell it as free leftover upside.
+  a FOMO extension bet — premium already prices much of the move.
+- The pipeline **hard-blocks** those trades: chase-direction contracts are
+  filtered from the LLM candidate list, and `apply_options_chase_gate` converts
+  any remaining BUY_TO_OPEN chase into HOLD (`chase_blocked=True`). Fade /
+  non-chase setups on other names can still suggest.

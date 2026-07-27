@@ -73,11 +73,12 @@ Rules:
 - SELL_TO_CLOSE open longs when thesis breaks, theta hurts, or TP/SL logic applies
 - Do NOT invent strikes/expiries not in candidates or positions
 - Prefer fewer, higher-quality trades over frequent lottery tickets
-- Do NOT be over-optimistic after large same-day moves: if day_moves shows the
-  underlying already up ~2.5%+ (calls) or down ~2.5%+ (puts), you may still
-  BUY_TO_OPEN when the setup is strong, but lower confidence, set risk HIGH, and
-  say plainly in reasoning that today's move is significant and more upside from
-  *here* is required (premium likely already prices much of the day).
+- NEVER chase large same-day moves: if day_moves shows the underlying already up
+  ≥ chase_limit_pct (default ~2.5%) do NOT BUY_TO_OPEN a call; if already down
+  ≥ chase_limit_pct do NOT BUY_TO_OPEN a put. Those extensions are already priced
+  into premium — HOLD or pick a different underlying / the opposite side only when
+  a real mean-reversion thesis is in the candidates. Chase-direction contracts may
+  already be filtered out of candidates.
 
 Schema:
 {
@@ -107,8 +108,7 @@ def options_decision_user_prompt(context: dict[str, Any]) -> str:
     return (
         "SHORT-TERM long options mandate. Rank underlyings, pick ONE best liquid contract "
         "from candidates when score >= 60, else HOLD. "
-        "Respect day_moves: after a large same-day extension, still suggest only with "
-        "lower confidence + clear chase caution in reasoning (do not pretend today's "
-        "move is free upside).\n\n"
+        "HARD RULE on day_moves: do NOT buy calls after a large green day or puts "
+        "after a large red day (see chase_limit_pct). Prefer HOLD over chasing.\n\n"
         + json.dumps(context, indent=2, default=str)
     )

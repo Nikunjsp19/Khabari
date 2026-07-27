@@ -117,7 +117,12 @@ def format_options_recommendation_message(
     if markdown:
         bullets = "\n".join(f"• {r}" for r in reasons) or "• (none)"
         chase = ""
-        if rec.get("chase_warned") and rec.get("day_pct") is not None:
+        if rec.get("chase_blocked") and rec.get("day_pct") is not None:
+            chase = (
+                f"\n⛔ Chase blocked: underlying already {rec['day_pct']:+.2f}% today — "
+                "extension already priced in; not suggesting a chase entry.\n"
+            )
+        elif rec.get("chase_warned") and rec.get("day_pct") is not None:
             chase = (
                 f"\n⚠️ Chase caution: underlying already {rec['day_pct']:+.2f}% today — "
                 "significant move; more continuation from here needed.\n"
@@ -138,7 +143,12 @@ def format_options_recommendation_message(
 
     bullets = "\n".join(f"• {r}" for r in reasons) or "• (none)"
     chase = ""
-    if rec.get("chase_warned") and rec.get("day_pct") is not None:
+    if rec.get("chase_blocked") and rec.get("day_pct") is not None:
+        chase = (
+            f"\nChase blocked: underlying already {rec['day_pct']:+.2f}% today — "
+            "extension already priced in; not suggesting a chase entry.\n"
+        )
+    elif rec.get("chase_warned") and rec.get("day_pct") is not None:
         chase = (
             f"\nChase caution: underlying already {rec['day_pct']:+.2f}% today — "
             "significant move; more continuation from here needed.\n"
