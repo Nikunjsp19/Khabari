@@ -378,6 +378,9 @@ def run_tilt_rebalance(
       200-day trend. Quiet (no notification) when there is nothing to do.
     """
     settings = get_settings()
+    if not settings.stocks_trading_enabled:
+        logger.info("Tilt rebalance skipped — STOCKS_TRADING_ENABLED=false")
+        return {"skipped": True, "reason": "stocks_trading_paused"}
     if not settings.tilt_enabled and not force:
         return {"skipped": True, "reason": "tilt_disabled"}
 

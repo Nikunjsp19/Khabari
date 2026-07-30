@@ -27,10 +27,9 @@ test the Python service (Docker is not preinstalled on this VM).
 ### Run / test / lint
 - Run app: from `python-service/`, `uvicorn app.main:app --host 127.0.0.1 --port 8000`
   (venv active, `MONGODB_URI` exported). Docs at `/docs`.
-- Tests: from `python-service/`, `pytest -q`. Note: `tests/test_gates.py::test_fingerprint_stable`
-  fails on a **pre-existing** bug unrelated to any current change (it expects two
-  different tickers sharing the same article `uuid` to hash differently, but
-  `fingerprint_article` intentionally keys off `uuid` when present).
+- Tests: from `python-service/`, `pytest -q`. All tests should pass.
+ (`fingerprint_article` now keys on ticker + article id, so two tickers sharing
+ one article no longer dedupe against each other.)
 - There is no separate linter configured; rely on tests.
 
 ### Trade window / notifications gotcha (important for testing)
@@ -66,10 +65,25 @@ test the Python service (Docker is not preinstalled on this VM).
   filtered from the LLM candidate list, and `apply_options_chase_gate` converts
   any remaining BUY_TO_OPEN chase into HOLD (`chase_blocked=True`). Fade /
   non-chase setups on other names can still suggest.
+- Also blocks **multi-session run-ups** (`options_max_runup_chase_pct`, default
+  8% over `options_chase_runup_sessions` sessions): flat today but +10% on the
+  week is still an extension.
 - Day % uses **live Yahoo quote** (`regularMarketPrice` / `previousClose`), not
   movers daily bars (those can miss today's incomplete session and understate
-  a +8% day). Missing day % is **fail-closed** (no BUY_TO_OPEN without it).
+  a +8% day).
+- **Fail-closed**: missing day %, unknown `right`, or missing ticker all block.
+- A blocked rec has its contract stripped (`right`/`strike`/`expiry` → None,
+  original kept in `blocked_contract`) and is **silent** by default
+  (`options_notify_chase_blocked=false`) — otherwise the hourly HOLD ping still
+  named the contract and read like a suggestion.
+- `day_moves` / `runups` are passed into **both** LLM passes; the `ranked` list
+  is sanitized so chase names cannot carry `bias: BUY_TO_OPEN`.
 
 ### Stock trading pause
-- `STOCKS_TRADING_ENABLED=false` (default) pauses tilt + LLM stock analyze +
-  stock news/position jobs. Options keep running. Set `true` to re-enable.
+- `STOCKS_TRADING_ENABLED=false` (default) pauses stock trading. Options keep
+  running. Set `true` to re-enable.
+- Gated at the **engine** level (not just callers): `run_tilt_rebalance`,
+  `run_exit_monitor`, `run_day_wrap`, plus `_maybe_analyze`, `_tilt_job`,
+  `_position_monitor_job`, `_day_wrap_job`, `trigger_tilt_now`, and the
+  `/analyze`, `/tilt/rebalance`, `/exits/run`, `/day-wrap` endpoints (403).
+- While paused, `start_scheduler` registers only options + watchdog jobs.

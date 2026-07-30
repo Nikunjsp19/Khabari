@@ -470,12 +470,16 @@ def _position_monitor_job() -> None:
     concrete SELL recommendation the user can confirm — no LLM spend required.
     """
     global _last_position_check
+    settings = get_settings()
+    if not settings.stocks_trading_enabled:
+        _last_position_check = {"skipped": True, "reason": "stocks_trading_paused"}
+        logger.info("Skipping stock position monitor — STOCKS_TRADING_ENABLED=false")
+        return
     status = market_hours_status()
     if not is_market_hours():
         _last_position_check = {"skipped": True, "reason": "outside_market_hours", "status": status}
         return
 
-    settings = get_settings()
     if not settings.exit_engine_enabled:
         try:
             review = positions_need_review()
@@ -553,6 +557,9 @@ def _tilt_job() -> None:
 
 def trigger_tilt_now(force: bool = True) -> dict[str, Any]:
     """Run the tilt engine immediately (API/ops)."""
+    settings = get_settings()
+    if not settings.stocks_trading_enabled:
+        return {"skipped": True, "reason": "stocks_trading_paused"}
     from app.tilt import run_tilt_rebalance
 
     return run_tilt_rebalance(force=force, send_notification=True)
@@ -561,6 +568,10 @@ def trigger_tilt_now(force: bool = True) -> dict[str, Any]:
 def _day_wrap_job() -> None:
     """Mon–Fri after the close: push concluding news + today's suggestions."""
     global _last_day_wrap
+    if not get_settings().stocks_trading_enabled:
+        _last_day_wrap = {"skipped": True, "reason": "stocks_trading_paused"}
+        logger.info("Skipping day wrap — STOCKS_TRADING_ENABLED=false")
+        return
     try:
         from app.day_wrap import run_day_wrap
 
@@ -676,7 +687,7 @@ def start_scheduler() -> BackgroundScheduler | None:
             "Stock trading jobs paused (STOCKS_TRADING_ENABLED=false) — options only"
         )
 
-    if settings.day_wrap_enabled:
+    if settings.day_wrap_enabled and settings.stocks_trading_enabled:
         sched.add_job(
             _day_wrap_job,
             CronTrigger(
@@ -779,7 +790,7 @@ def start_scheduler() -> BackgroundScheduler | None:
         )
 
     # If we start after the wrap time on a weekday, still send today's wrap once
-    if settings.day_wrap_enabled:
+    if settings.day_wrap_enabled and settings.stocks_trading_enabled:
         from app.market_hours import now_market
 
         now = now_market()

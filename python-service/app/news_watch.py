@@ -26,8 +26,15 @@ def _now() -> datetime:
 
 
 def fingerprint_article(ticker: str, article: dict[str, Any]) -> str:
-    raw = article.get("uuid") or f"{ticker}|{article.get('title', '')}|{article.get('url', '')}"
-    return hashlib.sha1(str(raw).encode("utf-8")).hexdigest()
+    """Per-ticker fingerprint.
+
+    The ticker must be part of the key: one article can mention several names,
+    and keying on ``uuid`` alone made the second ticker look already-seen, so
+    its news never triggered a scan.
+    """
+    ident = article.get("uuid") or f"{article.get('title', '')}|{article.get('url', '')}"
+    raw = f"{str(ticker).upper()}|{ident}"
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
 
 
 def load_watch_state() -> dict[str, Any]:

@@ -117,10 +117,16 @@ def format_options_recommendation_message(
     if markdown:
         bullets = "\n".join(f"• {r}" for r in reasons) or "• (none)"
         chase = ""
-        if rec.get("chase_blocked") and rec.get("day_pct") is not None:
+        if rec.get("chase_blocked"):
+            moved = rec.get("day_pct")
+            detail = (
+                f"underlying already {moved:+.2f}% today"
+                if moved is not None
+                else "could not verify today's move"
+            )
             chase = (
-                f"\n⛔ Chase blocked: underlying already {rec['day_pct']:+.2f}% today — "
-                "extension already priced in; not suggesting a chase entry.\n"
+                f"\n⛔ Chase blocked ({detail}) — extension already priced in; "
+                "no entry suggested.\n"
             )
         elif rec.get("chase_warned") and rec.get("day_pct") is not None:
             chase = (
@@ -143,10 +149,16 @@ def format_options_recommendation_message(
 
     bullets = "\n".join(f"• {r}" for r in reasons) or "• (none)"
     chase = ""
-    if rec.get("chase_blocked") and rec.get("day_pct") is not None:
+    if rec.get("chase_blocked"):
+        moved = rec.get("day_pct")
+        detail = (
+            f"underlying already {moved:+.2f}% today"
+            if moved is not None
+            else "could not verify today's move"
+        )
         chase = (
-            f"\nChase blocked: underlying already {rec['day_pct']:+.2f}% today — "
-            "extension already priced in; not suggesting a chase entry.\n"
+            f"\nChase blocked ({detail}) — extension already priced in; "
+            "no entry suggested.\n"
         )
     elif rec.get("chase_warned") and rec.get("day_pct") is not None:
         chase = (

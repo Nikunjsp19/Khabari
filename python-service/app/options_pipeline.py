@@ -14,11 +14,12 @@ from app.db import (
     save_options_recommendation,
     save_prices,
 )
-from app.day_moves import build_day_moves_map, fetch_live_day_pct
+from app.day_moves import build_day_moves_map, build_runup_map, fetch_live_day_pct
 from app.gates import (
     apply_options_chase_gate,
     apply_options_confidence_gate,
     filter_chase_candidates,
+    sanitize_ranked_for_chase,
     should_notify_options,
 )
 from app.indicators import compute_indicators_batch
@@ -200,16 +201,22 @@ def run_options_analysis(
     candidates_flat = list(scan.get("ranked") or [])
 
     day_moves = _day_moves_map(list(indicators.keys()), movers_meta)
+    runups = build_runup_map(
+        list(indicators.keys()), int(settings.options_chase_runup_sessions)
+    )
     logger.info(
-        "Options day_moves (chase gate ±%.1f%%): %s",
+        "Options day_moves (chase gate ±%.1f%% day / ±%.1f%% %sd run-up): %s | runups: %s",
         float(settings.options_max_intraday_chase_pct),
+        float(settings.options_max_runup_chase_pct),
+        int(settings.options_chase_runup_sessions),
         {k: round(v, 2) for k, v in sorted(day_moves.items())},
+        {k: round(v, 2) for k, v in sorted(runups.items())},
     )
 
     chase_dropped: list[dict[str, Any]] = []
     if settings.options_filter_chase_candidates:
         candidates_flat, chase_dropped = filter_chase_candidates(
-            candidates_flat, day_moves
+            candidates_flat, day_moves, runups=runups
         )
         if chase_dropped:
             logger.info(
@@ -302,7 +309,9 @@ def run_options_analysis(
         "scan_errors": scan.get("errors") or {},
         "prices": spots,
         "day_moves": day_moves,
+        "runups": runups,
         "chase_limit_pct": float(settings.options_max_intraday_chase_pct),
+        "chase_runup_limit_pct": float(settings.options_max_runup_chase_pct),
         "chase_candidates_filtered": len(chase_dropped),
     }
     decision = run_options_decision_agent(context)
@@ -337,14 +346,18 @@ def run_options_analysis(
                 "Chase pre-check: live day_pct unavailable for %s — fail-closed gate",
                 chosen,
             )
-    final = apply_options_chase_gate(final, day_moves)
+    final = apply_options_chase_gate(final, day_moves, runups=runups)
     # Premium moves while Gemini runs — re-quote Yahoo before we notify.
     final = _refresh_live_premium(final)
     # Premium refresh can flip HOLD→still BUY; re-assert chase on the live quote.
     if str(final.get("action") or "").upper() == "BUY_TO_OPEN":
-        final = apply_options_chase_gate(final, day_moves)
+        final = apply_options_chase_gate(final, day_moves, runups=runups)
     if "ranked" in decision:
-        final["ranked"] = decision.get("ranked")
+        # The ranking is persisted and rendered by the confirm UI — neutralize
+        # BUY_TO_OPEN bias on chase names so it can't read as a suggestion.
+        final["ranked"] = sanitize_ranked_for_chase(
+            decision.get("ranked"), day_moves, runups=runups
+        )
 
     prices_saved = save_prices(indicators)
     news_saved = save_news(news_raw)

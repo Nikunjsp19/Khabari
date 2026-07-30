@@ -164,8 +164,15 @@ class Settings(BaseSettings):
     # Hard-block BUY_TO_OPEN that chase a large same-day move
     # (calls when up ≥ pct; puts when down ≥ pct). Converted to HOLD.
     options_max_intraday_chase_pct: float = 2.5
+    # Also block multi-session extensions: a name flat today but +10% on the week
+    # is still a chase. Measured over options_chase_runup_sessions sessions.
+    options_max_runup_chase_pct: float = 8.0
+    options_chase_runup_sessions: int = 3
     # Also drop chase-direction contracts from the LLM candidate list
     options_filter_chase_candidates: bool = True
+    # Chase-blocked results are HOLD with no trade — stay silent instead of
+    # pinging an "ORCL CALL" heartbeat every hour (that reads like a suggestion).
+    options_notify_chase_blocked: bool = False
     # Split Gemini prompts into small batches to avoid read timeouts
     llm_ticker_batch_size: int = 3
     # Extra names always considered in the movers universe (comma-separated)

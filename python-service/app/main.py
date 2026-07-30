@@ -212,6 +212,15 @@ def day_wrap(force: bool = True) -> dict[str, Any]:
     Send (or preview-build) the end-of-day wrap: today's suggestions + top news.
     Defaults to force=true so manual calls can re-send.
     """
+    settings = get_settings()
+    if not settings.stocks_trading_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "stocks_trading_paused",
+                "message": "Stock trading is paused (STOCKS_TRADING_ENABLED=false). Set true to re-enable.",
+            },
+        )
     from app.day_wrap import run_day_wrap
 
     return run_day_wrap(force=force)
@@ -359,6 +368,15 @@ def exits_check() -> dict[str, Any]:
 @app.post("/exits/run")
 def exits_run(send: bool = True) -> dict[str, Any]:
     """Run the exit engine now; fires decisive SELL alerts on stop/target/time hits."""
+    settings = get_settings()
+    if not settings.stocks_trading_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "stocks_trading_paused",
+                "message": "Stock trading is paused (STOCKS_TRADING_ENABLED=false). Set true to re-enable.",
+            },
+        )
     from app.exits import run_exit_monitor
 
     return serialize_mongo(run_exit_monitor(send_notification=send))

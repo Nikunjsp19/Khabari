@@ -73,12 +73,14 @@ Rules:
 - SELL_TO_CLOSE open longs when thesis breaks, theta hurts, or TP/SL logic applies
 - Do NOT invent strikes/expiries not in candidates or positions
 - Prefer fewer, higher-quality trades over frequent lottery tickets
-- NEVER chase large same-day moves: if day_moves shows the underlying already up
+- NEVER chase large moves: if day_moves shows the underlying already up
   ≥ chase_limit_pct (default ~2.5%) do NOT BUY_TO_OPEN a call; if already down
-  ≥ chase_limit_pct do NOT BUY_TO_OPEN a put. Those extensions are already priced
-  into premium — HOLD or pick a different underlying / the opposite side only when
-  a real mean-reversion thesis is in the candidates. Chase-direction contracts may
-  already be filtered out of candidates.
+  ≥ chase_limit_pct do NOT BUY_TO_OPEN a put. The same applies to runups (recent
+  multi-session move) vs chase_runup_limit_pct — a name flat today but +10% on the
+  week is still an extension. Those moves are already priced into premium — HOLD or
+  pick a different underlying / the opposite side only when a real mean-reversion
+  thesis is in the candidates. Chase-direction contracts may already be filtered
+  out of candidates. Do not rank a chase name as bias BUY_TO_OPEN either.
 
 Schema:
 {
@@ -108,7 +110,8 @@ def options_decision_user_prompt(context: dict[str, Any]) -> str:
     return (
         "SHORT-TERM long options mandate. Rank underlyings, pick ONE best liquid contract "
         "from candidates when score >= 60, else HOLD. "
-        "HARD RULE on day_moves: do NOT buy calls after a large green day or puts "
-        "after a large red day (see chase_limit_pct). Prefer HOLD over chasing.\n\n"
+        "HARD RULE on day_moves/runups: do NOT buy calls after a large green day or "
+        "recent run-up, nor puts after a large red day or recent slide (see "
+        "chase_limit_pct / chase_runup_limit_pct). Prefer HOLD over chasing.\n\n"
         + json.dumps(context, indent=2, default=str)
     )

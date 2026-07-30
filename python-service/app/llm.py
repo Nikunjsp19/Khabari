@@ -270,8 +270,14 @@ def run_options_decision_agent(context: dict[str, Any]) -> dict[str, Any]:
             "portfolio": context.get("portfolio"),
             "mandate": (
                 "Rank ONLY these underlyings for short-term long call/put edge. "
+                "Do NOT favour names that already made a large move (see day_moves "
+                "/ runups vs chase_limit_pct) — those are chases. "
                 "Return JSON with ranked array only (no final trade yet)."
             ),
+            "day_moves": _subset_dict(context.get("day_moves") or {}, batch),
+            "runups": _subset_dict(context.get("runups") or {}, batch),
+            "chase_limit_pct": context.get("chase_limit_pct"),
+            "chase_runup_limit_pct": context.get("chase_runup_limit_pct"),
             "news": _subset_dict(news if isinstance(news, dict) else {}, batch),
             "technical": _subset_dict(tech if isinstance(tech, dict) else {}, batch),
             "candidates": [c for t in batch for c in by_und.get(t, [])][:8],
@@ -323,6 +329,10 @@ def run_options_decision_agent(context: dict[str, Any]) -> dict[str, Any]:
         "prices": _subset_dict(prices if isinstance(prices, dict) else {}, shortlist),
         "pre_ranked": ranked_all[:12],
         "shortlist": shortlist,
+        "day_moves": _subset_dict(context.get("day_moves") or {}, shortlist),
+        "runups": _subset_dict(context.get("runups") or {}, shortlist),
+        "chase_limit_pct": context.get("chase_limit_pct"),
+        "chase_runup_limit_pct": context.get("chase_runup_limit_pct"),
         "phase": "final_pick",
     }
     logger.info("Options decision final shortlist=%s", shortlist)

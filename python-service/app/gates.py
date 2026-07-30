@@ -77,14 +77,34 @@ def apply_options_confidence_gate(recommendation: dict[str, Any]) -> dict[str, A
     return rec
 
 
+def _normalize_right(right: str | None) -> str | None:
+    """Map model/vendor spellings to 'call' / 'put'; None when unrecognized."""
+    if right is None:
+        return None
+    side = str(right).strip().lower().rstrip("s")
+    if side in {"call", "c"}:
+        return "call"
+    if side in {"put", "p"}:
+        return "put"
+    return None
+
+
 def is_options_chase(
     right: str | None,
     day_pct: float | None,
     *,
     max_chase_pct: float | None = None,
+    runup_pct: float | None = None,
+    max_runup_pct: float | None = None,
 ) -> bool:
-    """True when buying this right would chase an already-large same-day move."""
-    if day_pct is None or right is None:
+    """
+    True when buying this right chases an already-large move.
+
+    Covers both the same-day extension (``day_pct``) and a multi-session run-up
+    (``runup_pct``) — a name flat today but +10% on the week is still a chase.
+    """
+    side = _normalize_right(right)
+    if side is None:
         return False
     settings = get_settings()
     threshold = float(
@@ -92,13 +112,27 @@ def is_options_chase(
         if max_chase_pct is not None
         else settings.options_max_intraday_chase_pct
     )
-    if threshold <= 0:
-        return False
-    side = str(right).lower()
-    move = float(day_pct)
-    return (side == "call" and move >= threshold) or (
-        side == "put" and move <= -threshold
+    runup_threshold = float(
+        max_runup_pct
+        if max_runup_pct is not None
+        else settings.options_max_runup_chase_pct
     )
+
+    if day_pct is not None and threshold > 0:
+        move = float(day_pct)
+        if (side == "call" and move >= threshold) or (
+            side == "put" and move <= -threshold
+        ):
+            return True
+
+    if runup_pct is not None and runup_threshold > 0:
+        run = float(runup_pct)
+        if (side == "call" and run >= runup_threshold) or (
+            side == "put" and run <= -runup_threshold
+        ):
+            return True
+
+    return False
 
 
 def filter_chase_candidates(
@@ -106,6 +140,7 @@ def filter_chase_candidates(
     day_moves: dict[str, float] | None = None,
     *,
     max_chase_pct: float | None = None,
+    runups: dict[str, float] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """
     Drop call candidates on big green days and put candidates on big red days.
@@ -113,17 +148,60 @@ def filter_chase_candidates(
     Returns (kept, dropped). Kept list is what the LLM should see.
     """
     day_moves = day_moves or {}
+    runups = runups or {}
     kept: list[dict[str, Any]] = []
     dropped: list[dict[str, Any]] = []
     for c in candidates:
         ticker = str(c.get("underlying") or c.get("ticker") or "").upper()
         right = c.get("right")
         day_pct = day_moves.get(ticker)
-        if is_options_chase(right, day_pct, max_chase_pct=max_chase_pct):
+        runup_pct = runups.get(ticker)
+        if is_options_chase(
+            right, day_pct, max_chase_pct=max_chase_pct, runup_pct=runup_pct
+        ):
             dropped.append(c)
         else:
             kept.append(c)
     return kept, dropped
+
+
+def sanitize_ranked_for_chase(
+    ranked: list[dict[str, Any]] | None,
+    day_moves: dict[str, float] | None = None,
+    *,
+    runups: dict[str, float] | None = None,
+) -> list[dict[str, Any]]:
+    """
+    Neutralize BUY_TO_OPEN bias on chase names in the LLM ranking.
+
+    The ranked list is persisted and rendered by the confirm UI, so a
+    ``bias: BUY_TO_OPEN`` on a +8% name still reads as a suggestion even when
+    the final action was blocked.
+    """
+    day_moves = day_moves or {}
+    runups = runups or {}
+    out: list[dict[str, Any]] = []
+    for row in ranked or []:
+        r = dict(row)
+        ticker = str(r.get("ticker") or "").upper()
+        bias = str(r.get("bias") or "").upper()
+        if bias == "BUY_TO_OPEN" and ticker:
+            day_pct = day_moves.get(ticker)
+            runup_pct = runups.get(ticker)
+            # Bias has no right; block if either direction would be a chase.
+            chasing = is_options_chase(
+                "call", day_pct, runup_pct=runup_pct
+            ) or is_options_chase("put", day_pct, runup_pct=runup_pct)
+            if chasing:
+                r["bias"] = "HOLD"
+                r["chase_blocked"] = True
+                moved = day_pct if day_pct is not None else runup_pct
+                r["note"] = (
+                    f"Chase blocked ({moved:+.2f}% recent move) — "
+                    f"{str(row.get('note') or '')}".strip()
+                )
+        out.append(r)
+    return out
 
 
 def _block_chase_buy(
@@ -145,6 +223,16 @@ def _block_chase_buy(
     rec["chase_warned"] = True
     rec["chase_blocked"] = True
     rec["gate_original_action"] = action
+    # Keep what was rejected for the audit trail, but strip the tradable contract
+    # so no downstream renderer can show "HOLD — ORCL CALL $300" as a suggestion.
+    rec["blocked_contract"] = {
+        "ticker": rec.get("ticker"),
+        "right": rec.get("right"),
+        "strike": rec.get("strike"),
+        "expiry": rec.get("expiry"),
+    }
+    for field in ("right", "strike", "expiry", "contract_key", "osi", "premium"):
+        rec[field] = None
     if str(rec.get("risk") or "").upper() != "HIGH":
         rec["risk"] = "HIGH"
         notes.append("Chase blocked: risk bumped to HIGH")
@@ -158,15 +246,16 @@ def apply_options_chase_gate(
     day_moves: dict[str, float] | None = None,
     *,
     max_chase_pct: float | None = None,
+    runups: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """
-    Hard-block BUY_TO_OPEN that chase an already-large same-day move.
+    Hard-block BUY_TO_OPEN that chase an already-large move.
 
     Buying calls after a big green day (or puts after a dump) is a classic FOMO
-    bet — premium already prices much of the move. Convert to HOLD so we never
-    ping those extensions as actionable trades.
+    bet — premium already prices much of the move. Same for a multi-session
+    run-up. Convert to HOLD so we never ping extensions as actionable trades.
 
-    Fail-closed: if day % is unknown we still block (do not suggest blind chases).
+    Fail-closed: unknown day %, unrecognized right, or missing ticker all block.
     """
     settings = get_settings()
     rec = dict(recommendation)
@@ -179,40 +268,57 @@ def apply_options_chase_gate(
         else settings.options_max_intraday_chase_pct
     )
     day_moves = day_moves or {}
+    runups = runups or {}
 
     rec["chase_warned"] = False
     rec["chase_blocked"] = False
 
-    if action != "BUY_TO_OPEN" or threshold <= 0:
+    if action != "BUY_TO_OPEN":
         rec["risk_notes"] = notes
         return rec
 
     ticker = str(rec.get("ticker") or "").upper()
-    right = str(rec.get("right") or "").lower()
-    if not ticker:
-        rec["risk_notes"] = notes
-        return rec
+    side = _normalize_right(rec.get("right"))
+    if not ticker or side is None:
+        warn = (
+            "Chase blocked: incomplete trade "
+            f"(ticker={ticker or 'unknown'}, right={rec.get('right')!r}) — "
+            "cannot verify today's extension, refusing BUY_TO_OPEN (fail-closed)."
+        )
+        return _block_chase_buy(
+            rec, action=action, notes=notes, reasoning=reasoning, warn=warn
+        )
 
     day_pct = day_moves.get(ticker)
+    runup_pct = runups.get(ticker)
+    if day_pct is not None:
+        rec["day_pct"] = round(float(day_pct), 3)
+    if runup_pct is not None:
+        rec["runup_pct"] = round(float(runup_pct), 3)
+
     if day_pct is None:
         warn = (
             f"Chase blocked: live day move unavailable for {ticker} — refusing "
-            f"BUY_TO_OPEN {right} (fail-closed; will not suggest without knowing "
+            f"BUY_TO_OPEN {side} (fail-closed; will not suggest without knowing "
             f"today's extension)."
         )
         return _block_chase_buy(
             rec, action=action, notes=notes, reasoning=reasoning, warn=warn
         )
 
-    rec["day_pct"] = round(float(day_pct), 3)
-    if not is_options_chase(right, day_pct, max_chase_pct=threshold):
+    if not is_options_chase(
+        side, day_pct, max_chase_pct=threshold, runup_pct=runup_pct
+    ):
         rec["risk_notes"] = notes
         return rec
 
+    runup_note = (
+        f" and {runup_pct:+.2f}% over recent sessions" if runup_pct is not None else ""
+    )
     warn = (
-        f"Chase blocked: {ticker} already {day_pct:+.2f}% today — a ~{abs(day_pct):.1f}% "
-        f"day is significant; buying a {right} now is chasing an extension "
-        f"(premium already prices much of today's move). Converted BUY_TO_OPEN → HOLD."
+        f"Chase blocked: {ticker} already {day_pct:+.2f}% today{runup_note} — that move "
+        f"is significant; buying a {side} now is chasing an extension "
+        f"(premium already prices much of it). Converted BUY_TO_OPEN → HOLD."
     )
     return _block_chase_buy(
         rec, action=action, notes=notes, reasoning=reasoning, warn=warn
@@ -227,6 +333,11 @@ def should_notify_options(recommendation: dict[str, Any]) -> tuple[bool, str]:
     action = str(recommendation.get("action", "HOLD")).upper()
     conf = float(recommendation.get("confidence", 0) or 0)
     min_conf = float(settings.options_min_notify_confidence)
+
+    # Chase-blocked results are a non-trade. Pinging them hourly reads like a
+    # suggestion for the very name we refused, so stay silent by default.
+    if recommendation.get("chase_blocked") and not settings.options_notify_chase_blocked:
+        return False, "chase_blocked_silent"
 
     # Always ping options HOLDs so you know the hourly scan ran (stocks stay silent on HOLD)
     if action == "HOLD":

@@ -306,6 +306,9 @@ def run_exit_monitor(*, send_notification: bool = True) -> dict[str, Any]:
     from app.notify import notify_recommendation
 
     settings = get_settings()
+    if not settings.stocks_trading_enabled:
+        logger.info("Exit monitor skipped — STOCKS_TRADING_ENABLED=false")
+        return {"ok": True, "skipped": True, "reason": "stocks_trading_paused", "alerted": []}
     try:
         from app.signals import market_regime
 

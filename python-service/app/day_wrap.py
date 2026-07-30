@@ -268,6 +268,14 @@ def run_day_wrap(*, force: bool = False) -> dict[str, Any]:
     """Build + send end-of-day wrap. Idempotent per calendar day unless force=True."""
     settings = get_settings()
     now = now_market()
+    # The wrap summarizes STOCK suggestions — stay silent while stocks are paused
+    if not settings.stocks_trading_enabled:
+        logger.info("Day wrap skipped — STOCKS_TRADING_ENABLED=false")
+        return {
+            "skipped": True,
+            "reason": "stocks_trading_paused",
+            "day": now.date().isoformat(),
+        }
     # Only send on weekdays (Mon–Fri)
     if now.weekday() > 4 and not force:
         return {"skipped": True, "reason": "weekend", "day": now.date().isoformat()}

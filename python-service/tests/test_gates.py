@@ -5,7 +5,9 @@ from app.gates import (
     apply_options_chase_gate,
     filter_chase_candidates,
     is_options_chase,
+    sanitize_ranked_for_chase,
     should_notify,
+    should_notify_options,
 )
 from app.news_watch import fingerprint_article
 
@@ -251,6 +253,8 @@ def test_options_chase_gate_blocks_orcl_style_extension(monkeypatch):
         "ticker": "ORCL",
         "action": "BUY_TO_OPEN",
         "right": "call",
+        "strike": 300,
+        "expiry": "2026-08-21",
         "contracts": 1,
         "premium": 7.0,
         "investment": 700,
@@ -264,4 +268,112 @@ def test_options_chase_gate_blocks_orcl_style_extension(monkeypatch):
     assert out["action"] == "HOLD"
     assert out["chase_blocked"] is True
     assert out["day_pct"] == 8.0
+    # Contract must be stripped so no renderer shows "HOLD — ORCL CALL $300"
+    assert out["right"] is None
+    assert out["strike"] is None
+    assert out["expiry"] is None
+    assert out["blocked_contract"]["right"] == "call"
+    get_settings.cache_clear()
+
+
+def test_options_chase_gate_blocks_multiday_runup(monkeypatch):
+    """Flat today but +10% on the week is still an extension bet."""
+    monkeypatch.setenv("OPTIONS_MAX_INTRADAY_CHASE_PCT", "2.5")
+    monkeypatch.setenv("OPTIONS_MAX_RUNUP_CHASE_PCT", "8")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    rec = {
+        "ticker": "PLTR",
+        "action": "BUY_TO_OPEN",
+        "right": "call",
+        "strike": 90,
+        "expiry": "2026-08-21",
+        "contracts": 1,
+        "premium": 4.0,
+        "investment": 400,
+        "confidence": 80,
+        "risk": "MEDIUM",
+        "risk_notes": [],
+        "reasoning": [],
+    }
+    out = apply_options_chase_gate(rec, {"PLTR": 0.4}, runups={"PLTR": 11.0})
+    assert out["action"] == "HOLD"
+    assert out["chase_blocked"] is True
+    assert out["runup_pct"] == 11.0
+    get_settings.cache_clear()
+
+
+def test_options_chase_gate_fail_closed_on_unknown_right(monkeypatch):
+    monkeypatch.setenv("OPTIONS_MAX_INTRADAY_CHASE_PCT", "2.5")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    rec = {
+        "ticker": "AAPL",
+        "action": "BUY_TO_OPEN",
+        "right": "spread",
+        "contracts": 1,
+        "investment": 300,
+        "confidence": 80,
+        "risk_notes": [],
+    }
+    out = apply_options_chase_gate(rec, {"AAPL": 0.2})
+    assert out["action"] == "HOLD"
+    assert out["chase_blocked"] is True
+    get_settings.cache_clear()
+
+
+def test_options_chase_gate_normalizes_right_spelling(monkeypatch):
+    monkeypatch.setenv("OPTIONS_MAX_INTRADAY_CHASE_PCT", "2.5")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    rec = {
+        "ticker": "NVDA",
+        "action": "BUY_TO_OPEN",
+        "right": "CALLS",
+        "contracts": 1,
+        "investment": 500,
+        "confidence": 80,
+        "risk_notes": [],
+    }
+    out = apply_options_chase_gate(rec, {"NVDA": 6.0})
+    assert out["action"] == "HOLD"
+    assert out["chase_blocked"] is True
+    get_settings.cache_clear()
+
+
+def test_chase_blocked_hold_is_silent(monkeypatch):
+    """Hourly pings naming the blocked contract are what felt like spam."""
+    monkeypatch.setenv("NOTIFY_ONLY_ACTIONABLE", "true")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    ok, reason = should_notify_options(
+        {"action": "HOLD", "confidence": 70, "chase_blocked": True}
+    )
+    assert ok is False
+    assert reason == "chase_blocked_silent"
+
+    ok2, reason2 = should_notify_options({"action": "HOLD", "confidence": 70})
+    assert ok2 is True
+    assert reason2 == "options_hold_status"
+    get_settings.cache_clear()
+
+
+def test_sanitize_ranked_neutralizes_chase_bias(monkeypatch):
+    monkeypatch.setenv("OPTIONS_MAX_INTRADAY_CHASE_PCT", "2.5")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    ranked = [
+        {"ticker": "ORCL", "score": 88, "bias": "BUY_TO_OPEN", "note": "breakout"},
+        {"ticker": "AAPL", "score": 70, "bias": "BUY_TO_OPEN", "note": "steady"},
+    ]
+    out = sanitize_ranked_for_chase(ranked, {"ORCL": 8.0, "AAPL": 0.3})
+    by_ticker = {r["ticker"]: r for r in out}
+    assert by_ticker["ORCL"]["bias"] == "HOLD"
+    assert by_ticker["ORCL"]["chase_blocked"] is True
+    assert by_ticker["AAPL"]["bias"] == "BUY_TO_OPEN"
     get_settings.cache_clear()

@@ -55,6 +55,63 @@ def fetch_live_day_pct(ticker: str) -> float | None:
     return None
 
 
+def fetch_runup_pct(ticker: str, sessions: int = 3) -> float | None:
+    """
+    % change over the last ``sessions`` sessions (including today, live).
+
+    A stock can be flat today yet already +10% on the week — buying calls into
+    that is still an extension bet, so the chase gate needs this too.
+    """
+    t = str(ticker or "").strip().upper()
+    if not t or sessions < 1:
+        return None
+    try:
+        import httpx
+
+        url = (
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{t}"
+            f"?interval=1d&range=1mo"
+        )
+        with httpx.Client(timeout=8.0, headers={"User-Agent": "Mozilla/5.0"}) as client:
+            resp = client.get(url)
+            resp.raise_for_status()
+            result = (resp.json().get("chart") or {}).get("result") or []
+            if not result:
+                return None
+            res = result[0]
+            meta = res.get("meta") or {}
+            quote = ((res.get("indicators") or {}).get("quote") or [{}])[0]
+            closes = [c for c in (quote.get("close") or []) if c is not None]
+            if not closes:
+                return None
+            live = meta.get("regularMarketPrice")
+            last = float(live) if live is not None else float(closes[-1])
+            # Base = close ``sessions`` sessions back (exclude today's own close)
+            idx = len(closes) - 1 - sessions
+            if idx < 0:
+                idx = 0
+            base = float(closes[idx])
+            if base <= 0:
+                return None
+            return round((last / base - 1.0) * 100.0, 3)
+    except Exception:  # noqa: BLE001
+        logger.debug("runup fetch failed for %s", t, exc_info=True)
+    return None
+
+
+def build_runup_map(symbols: list[str], sessions: int = 3) -> dict[str, float]:
+    """Recent multi-session run-up % per ticker (best effort)."""
+    out: dict[str, float] = {}
+    for s in symbols:
+        t = str(s).strip().upper()
+        if not t:
+            continue
+        pct = fetch_runup_pct(t, sessions)
+        if pct is not None:
+            out[t] = pct
+    return out
+
+
 def build_day_moves_map(
     symbols: list[str],
     movers_meta: dict[str, Any] | None = None,
