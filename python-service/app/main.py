@@ -57,6 +57,7 @@ from app.schemas import (
     OptionsPortfolioState,
     PortfolioRowsRequest,
     PortfolioState,
+    ResetRequest,
     RiskRequest,
 )
 from app.trades import (
@@ -148,6 +149,7 @@ def root() -> dict[str, Any]:
             "POST /analyze",
             "GET /portfolio",
             "GET /portfolio/marked",
+            "POST /reset",
             "POST /trades/{id}/execute",
             "POST /trades/{id}/skip",
             "GET /recommendations/latest",
@@ -558,6 +560,32 @@ def portfolio_latest() -> dict[str, Any]:
 def portfolio_save(body: PortfolioState) -> dict[str, Any]:
     doc_id = save_portfolio(body.cash, {k: v.model_dump() for k, v in body.positions.items()})
     return {"id": doc_id, "portfolio": body.model_dump()}
+
+
+@app.post("/reset")
+def reset(body: ResetRequest | None = None) -> dict[str, Any]:
+    """
+    Fresh start: clear stock + options positions, cancel pending confirms, and
+    drop exit/tilt state. Cash defaults to the configured starting balances.
+    """
+    from app.reset import reset_book
+
+    body = body or ResetRequest()
+    try:
+        result = reset_book(
+            cash=body.cash,
+            options_cash=body.options_cash,
+            clear_history=body.clear_history,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return serialize_mongo(
+        {
+            **result,
+            "portfolio": get_latest_portfolio(),
+            "options_portfolio": get_latest_options_portfolio(),
+        }
+    )
 
 
 @app.get("/recommendations/latest")

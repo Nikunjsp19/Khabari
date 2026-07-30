@@ -23,6 +23,14 @@ class PortfolioState(BaseModel):
     positions: dict[str, Position] = Field(default_factory=dict)
 
 
+class ResetRequest(BaseModel):
+    """Fresh start: zero positions in both books."""
+
+    cash: float | None = Field(default=None, ge=0)
+    options_cash: float | None = Field(default=None, ge=0)
+    clear_history: bool = False
+
+
 class Recommendation(BaseModel):
     ticker: str
     action: Literal["BUY", "SELL", "HOLD"]
