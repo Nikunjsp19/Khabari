@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     # When enabled it REPLACES the LLM buy/sell-timing analyze + ATR exit engine for
     # stocks (same notify → manual trade → confirm-in-Hisaab workflow). Set
     # TILT_ENABLED=false to fall back to the old LLM/exit engine.
+    #
+    # Master pause for ALL stock trading jobs (tilt + LLM analyze + news/position
+    # stock monitors). Options keep running. Set true when you want stock pings again.
+    stocks_trading_enabled: bool = False
     tilt_enabled: bool = True
     tilt_top_n: int = 10                    # equal-weight slots
     tilt_require_uptrend: bool = True       # only hold names above their 200d SMA
@@ -157,11 +161,11 @@ class Settings(BaseSettings):
     # Cap deep chain scans so options runs finish before Gemini timeouts
     options_analyze_max_symbols: int = 8
     options_max_candidates_for_llm: int = 15
-    # Soft caution (warn + confidence haircut) when underlying already moved hard today
-    # (calls: up ≥ pct; puts: down ≥ pct). Still suggests — does not force HOLD.
+    # Hard-block BUY_TO_OPEN that chase a large same-day move
+    # (calls when up ≥ pct; puts when down ≥ pct). Converted to HOLD.
     options_max_intraday_chase_pct: float = 2.5
-    # Soft caution only (do not block): subtract from confidence when chase fires
-    options_chase_confidence_haircut: float = 10.0
+    # Also drop chase-direction contracts from the LLM candidate list
+    options_filter_chase_candidates: bool = True
     # Split Gemini prompts into small batches to avoid read timeouts
     llm_ticker_batch_size: int = 3
     # Extra names always considered in the movers universe (comma-separated)

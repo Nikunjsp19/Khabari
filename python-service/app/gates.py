@@ -77,19 +77,96 @@ def apply_options_confidence_gate(recommendation: dict[str, Any]) -> dict[str, A
     return rec
 
 
+def is_options_chase(
+    right: str | None,
+    day_pct: float | None,
+    *,
+    max_chase_pct: float | None = None,
+) -> bool:
+    """True when buying this right would chase an already-large same-day move."""
+    if day_pct is None or right is None:
+        return False
+    settings = get_settings()
+    threshold = float(
+        max_chase_pct
+        if max_chase_pct is not None
+        else settings.options_max_intraday_chase_pct
+    )
+    if threshold <= 0:
+        return False
+    side = str(right).lower()
+    move = float(day_pct)
+    return (side == "call" and move >= threshold) or (
+        side == "put" and move <= -threshold
+    )
+
+
+def filter_chase_candidates(
+    candidates: list[dict[str, Any]],
+    day_moves: dict[str, float] | None = None,
+    *,
+    max_chase_pct: float | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """
+    Drop call candidates on big green days and put candidates on big red days.
+
+    Returns (kept, dropped). Kept list is what the LLM should see.
+    """
+    day_moves = day_moves or {}
+    kept: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    for c in candidates:
+        ticker = str(c.get("underlying") or c.get("ticker") or "").upper()
+        right = c.get("right")
+        day_pct = day_moves.get(ticker)
+        if is_options_chase(right, day_pct, max_chase_pct=max_chase_pct):
+            dropped.append(c)
+        else:
+            kept.append(c)
+    return kept, dropped
+
+
+def _block_chase_buy(
+    rec: dict[str, Any],
+    *,
+    action: str,
+    notes: list[str],
+    reasoning: list[str],
+    warn: str,
+) -> dict[str, Any]:
+    if warn not in notes:
+        notes.append(warn)
+    if warn not in reasoning:
+        reasoning.insert(0, warn)
+    rec["action"] = "HOLD"
+    rec["investment"] = 0
+    rec["contracts"] = 0
+    rec["max_loss"] = 0
+    rec["chase_warned"] = True
+    rec["chase_blocked"] = True
+    rec["gate_original_action"] = action
+    if str(rec.get("risk") or "").upper() != "HIGH":
+        rec["risk"] = "HIGH"
+        notes.append("Chase blocked: risk bumped to HIGH")
+    rec["risk_notes"] = notes
+    rec["reasoning"] = reasoning
+    return rec
+
+
 def apply_options_chase_gate(
     recommendation: dict[str, Any],
     day_moves: dict[str, float] | None = None,
     *,
     max_chase_pct: float | None = None,
-    confidence_haircut: float | None = None,
 ) -> dict[str, Any]:
     """
-    Caution on BUY_TO_OPEN that chase an already-large same-day move.
+    Hard-block BUY_TO_OPEN that chase an already-large same-day move.
 
-    Does **not** block the suggestion — a ~3% day is significant and buying calls
-    after that is optimistic, but the user may still want the ping. Warn, haircut
-    confidence, and bump risk so the caution is visible.
+    Buying calls after a big green day (or puts after a dump) is a classic FOMO
+    bet — premium already prices much of the move. Convert to HOLD so we never
+    ping those extensions as actionable trades.
+
+    Fail-closed: if day % is unknown we still block (do not suggest blind chases).
     """
     settings = get_settings()
     rec = dict(recommendation)
@@ -101,61 +178,45 @@ def apply_options_chase_gate(
         if max_chase_pct is not None
         else settings.options_max_intraday_chase_pct
     )
-    haircut = float(
-        confidence_haircut
-        if confidence_haircut is not None
-        else settings.options_chase_confidence_haircut
-    )
     day_moves = day_moves or {}
 
+    rec["chase_warned"] = False
+    rec["chase_blocked"] = False
+
     if action != "BUY_TO_OPEN" or threshold <= 0:
-        rec["chase_warned"] = False
         rec["risk_notes"] = notes
         return rec
 
     ticker = str(rec.get("ticker") or "").upper()
     right = str(rec.get("right") or "").lower()
-    day_pct = day_moves.get(ticker)
-    if day_pct is None or not ticker:
-        rec["chase_warned"] = False
+    if not ticker:
         rec["risk_notes"] = notes
         return rec
 
-    rec["day_pct"] = round(float(day_pct), 3)
-    chasing = (right == "call" and day_pct >= threshold) or (
-        right == "put" and day_pct <= -threshold
-    )
-    if chasing:
+    day_pct = day_moves.get(ticker)
+    if day_pct is None:
         warn = (
-            f"Chase caution: {ticker} already {day_pct:+.2f}% today — a ~{abs(day_pct):.1f}% "
-            f"day is significant; buying a {right} now needs *further* continuation from here "
-            f"(premium likely already prices much of today's move)."
+            f"Chase blocked: live day move unavailable for {ticker} — refusing "
+            f"BUY_TO_OPEN {right} (fail-closed; will not suggest without knowing "
+            f"today's extension)."
         )
-        notes.append(warn)
-        if warn not in reasoning:
-            reasoning.insert(0, warn)
-        conf = float(rec.get("confidence", 0) or 0)
-        if haircut > 0 and conf > 0:
-            new_conf = max(0.0, conf - haircut)
-            # Keep suggestable: don't silence the ping with the haircut alone.
-            floor = float(settings.options_min_notify_confidence)
-            floored = max(new_conf, floor)
-            notes.append(
-                f"Chase caution: confidence {conf:.0f} → {floored:.0f} "
-                f"(−{haircut:.0f}, floored at notify min {floor:.0f})"
-            )
-            rec["confidence"] = round(floored, 1)
-        # Still suggest, but don't present as a low-risk slam dunk.
-        if str(rec.get("risk") or "").upper() != "HIGH":
-            rec["risk"] = "HIGH"
-            notes.append("Chase caution: risk bumped to HIGH")
-        rec["chase_warned"] = True
-    else:
-        rec["chase_warned"] = False
+        return _block_chase_buy(
+            rec, action=action, notes=notes, reasoning=reasoning, warn=warn
+        )
 
-    rec["risk_notes"] = notes
-    rec["reasoning"] = reasoning
-    return rec
+    rec["day_pct"] = round(float(day_pct), 3)
+    if not is_options_chase(right, day_pct, max_chase_pct=threshold):
+        rec["risk_notes"] = notes
+        return rec
+
+    warn = (
+        f"Chase blocked: {ticker} already {day_pct:+.2f}% today — a ~{abs(day_pct):.1f}% "
+        f"day is significant; buying a {right} now is chasing an extension "
+        f"(premium already prices much of today's move). Converted BUY_TO_OPEN → HOLD."
+    )
+    return _block_chase_buy(
+        rec, action=action, notes=notes, reasoning=reasoning, warn=warn
+    )
 
 
 def should_notify_options(recommendation: dict[str, Any]) -> tuple[bool, str]:
