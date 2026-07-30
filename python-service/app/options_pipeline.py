@@ -14,6 +14,7 @@ from app.db import (
     save_options_recommendation,
     save_prices,
 )
+from app.day_moves import build_day_moves_map, fetch_live_day_pct
 from app.gates import (
     apply_options_chase_gate,
     apply_options_confidence_gate,
@@ -37,47 +38,8 @@ def _day_moves_map(
     symbols: list[str],
     movers_meta: dict[str, Any] | None = None,
 ) -> dict[str, float]:
-    """Same-day % vs prior close for chase gating (movers first, Yahoo chart fallback)."""
-    out: dict[str, float] = {}
-    if movers_meta:
-        for row in movers_meta.get("ranked") or []:
-            t = str(row.get("ticker") or "").upper()
-            if t and row.get("day_pct") is not None:
-                try:
-                    out[t] = float(row["day_pct"])
-                except (TypeError, ValueError):
-                    pass
-
-    missing = [s.upper() for s in symbols if s.upper() not in out]
-    if not missing:
-        return out
-
-    try:
-        import httpx
-    except ImportError:
-        return out
-
-    for ticker in missing:
-        try:
-            url = (
-                f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
-                f"?interval=1d&range=5d"
-            )
-            with httpx.Client(timeout=8.0, headers={"User-Agent": "Mozilla/5.0"}) as client:
-                resp = client.get(url)
-                resp.raise_for_status()
-                result = (resp.json().get("chart") or {}).get("result") or []
-                if not result:
-                    continue
-                meta = result[0].get("meta") or {}
-                px = meta.get("regularMarketPrice")
-                prev = meta.get("previousClose") or meta.get("chartPreviousClose")
-                if px is None or not prev:
-                    continue
-                out[ticker] = round((float(px) / float(prev) - 1.0) * 100.0, 3)
-        except Exception:  # noqa: BLE001
-            logger.debug("day_move fetch failed for %s", ticker, exc_info=True)
-    return out
+    """Same-day % vs prior close — live quote preferred over movers daily bars."""
+    return build_day_moves_map(symbols, movers_meta, prefer_live=True)
 
 
 def _refresh_live_premium(final: dict[str, Any]) -> dict[str, Any]:
@@ -353,9 +315,34 @@ def run_options_analysis(
         candidates=candidates_flat,
     )
     final = apply_options_confidence_gate(final)
+    # Re-resolve LIVE day % for the chosen ticker right before the chase gate.
+    # Movers daily bars can miss today's session and understate a +8% day as flat.
+    chosen = str(final.get("ticker") or "").upper()
+    if chosen and str(final.get("action") or "").upper() == "BUY_TO_OPEN":
+        live_pct = fetch_live_day_pct(chosen)
+        if live_pct is not None:
+            prior = day_moves.get(chosen)
+            day_moves[chosen] = live_pct
+            if prior is not None and abs(live_pct - float(prior)) >= 1.0:
+                logger.info(
+                    "Chase pre-check live override %s: %.2f%% → %.2f%%",
+                    chosen,
+                    prior,
+                    live_pct,
+                )
+            else:
+                logger.info("Chase pre-check live day_pct %s=%.2f%%", chosen, live_pct)
+        else:
+            logger.warning(
+                "Chase pre-check: live day_pct unavailable for %s — fail-closed gate",
+                chosen,
+            )
     final = apply_options_chase_gate(final, day_moves)
     # Premium moves while Gemini runs — re-quote Yahoo before we notify.
     final = _refresh_live_premium(final)
+    # Premium refresh can flip HOLD→still BUY; re-assert chase on the live quote.
+    if str(final.get("action") or "").upper() == "BUY_TO_OPEN":
+        final = apply_options_chase_gate(final, day_moves)
     if "ranked" in decision:
         final["ranked"] = decision.get("ranked")
 

@@ -79,6 +79,10 @@ class Settings(BaseSettings):
     # When enabled it REPLACES the LLM buy/sell-timing analyze + ATR exit engine for
     # stocks (same notify → manual trade → confirm-in-Hisaab workflow). Set
     # TILT_ENABLED=false to fall back to the old LLM/exit engine.
+    #
+    # Master pause for ALL stock trading jobs (tilt + LLM analyze + news/position
+    # stock monitors). Options keep running. Set true when you want stock pings again.
+    stocks_trading_enabled: bool = False
     tilt_enabled: bool = True
     tilt_top_n: int = 10                    # equal-weight slots
     tilt_require_uptrend: bool = True       # only hold names above their 200d SMA

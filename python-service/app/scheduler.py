@@ -57,6 +57,17 @@ def _record_analyze(result: dict[str, Any], *, trigger: str, status: dict[str, A
 
 def _maybe_analyze(trigger: str, *, force_cooldown: bool = False) -> dict[str, Any]:
     global _last_run
+    settings = get_settings()
+    if not settings.stocks_trading_enabled:
+        out = {
+            "skipped": True,
+            "reason": "stocks_trading_paused",
+            "trigger": trigger,
+            "status": market_hours_status(),
+        }
+        logger.info("Skipping stock analyze (%s) — STOCKS_TRADING_ENABLED=false", trigger)
+        _last_run = out
+        return out
     status = market_hours_status()
     if not is_market_hours():
         out = {"skipped": True, "reason": "outside_market_hours", "status": status, "trigger": trigger}
@@ -376,7 +387,7 @@ def _watchdog_job() -> None:
             _maybe_options_analyze("watchdog", force_cooldown=True)
 
     # Stocks (tilt): only a couple cron slots/day — if morning slot was missed, run once
-    if settings.tilt_enabled:
+    if settings.stocks_trading_enabled and settings.tilt_enabled:
         from app.market_hours import now_market
 
         now = now_market()
@@ -508,6 +519,15 @@ def _tilt_job() -> None:
     check. Emits standard BUY/SELL recommendations you confirm in Hisaab.
     """
     global _last_tilt_run
+    settings = get_settings()
+    if not settings.stocks_trading_enabled:
+        _last_tilt_run = {
+            "skipped": True,
+            "reason": "stocks_trading_paused",
+            "status": market_hours_status(),
+        }
+        logger.info("Skipping tilt — STOCKS_TRADING_ENABLED=false")
+        return
     status = market_hours_status()
     if not is_market_hours():
         _last_tilt_run = {"skipped": True, "reason": "outside_market_hours", "status": status}
@@ -596,7 +616,7 @@ def start_scheduler() -> BackgroundScheduler | None:
         backup_hours.insert(0, settings.market_start_hour)
     backup_hour_expr = ",".join(str(h) for h in sorted(set(backup_hours)))
 
-    if settings.tilt_enabled:
+    if settings.stocks_trading_enabled and settings.tilt_enabled:
         # Momentum tilt is the primary stock engine: it replaces the LLM
         # buy/sell-timing analyze (backup + news-triggered) AND the ATR exit
         # engine, because the tilt has its own monthly rebalance + trend brake.
@@ -616,7 +636,7 @@ def start_scheduler() -> BackgroundScheduler | None:
             id="khabari_tilt",
             replace_existing=True,
         )
-    else:
+    elif settings.stocks_trading_enabled:
         sched.add_job(
             _backup_job,
             CronTrigger(
@@ -650,6 +670,10 @@ def start_scheduler() -> BackgroundScheduler | None:
             ),
             id="khabari_position_monitor",
             replace_existing=True,
+        )
+    else:
+        logger.info(
+            "Stock trading jobs paused (STOCKS_TRADING_ENABLED=false) — options only"
         )
 
     if settings.day_wrap_enabled:
@@ -731,15 +755,16 @@ def start_scheduler() -> BackgroundScheduler | None:
 
     # If we start mid-session (or wake from sleep), don't wait for the next cron tick
     if is_market_hours():
-        sched.add_job(
-            _tilt_job if settings.tilt_enabled else _backup_job,
-            id="khabari_startup_catchup",
-            replace_existing=True,
-        )
-        logger.info(
-            "Queued startup catch-up %s (market is open)",
-            "tilt rebalance" if settings.tilt_enabled else "analyze",
-        )
+        if settings.stocks_trading_enabled:
+            sched.add_job(
+                _tilt_job if settings.tilt_enabled else _backup_job,
+                id="khabari_startup_catchup",
+                replace_existing=True,
+            )
+            logger.info(
+                "Queued startup catch-up %s (market is open)",
+                "tilt rebalance" if settings.tilt_enabled else "analyze",
+            )
         if settings.options_scheduler_enabled:
             sched.add_job(
                 _options_backup_job,
@@ -842,6 +867,7 @@ def scheduler_status() -> dict[str, Any]:
             "exit_initial_stop_atr_mult": settings.exit_initial_stop_atr_mult,
             "exit_time_stop_days": settings.exit_time_stop_days,
             "tilt_enabled": settings.tilt_enabled,
+            "stocks_trading_enabled": settings.stocks_trading_enabled,
             "tilt_top_n": settings.tilt_top_n,
             "tilt_rebalance_band_pct": settings.tilt_rebalance_band_pct,
             "tilt_require_uptrend": settings.tilt_require_uptrend,

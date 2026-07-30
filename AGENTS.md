@@ -66,3 +66,10 @@ test the Python service (Docker is not preinstalled on this VM).
   filtered from the LLM candidate list, and `apply_options_chase_gate` converts
   any remaining BUY_TO_OPEN chase into HOLD (`chase_blocked=True`). Fade /
   non-chase setups on other names can still suggest.
+- Day % uses **live Yahoo quote** (`regularMarketPrice` / `previousClose`), not
+  movers daily bars (those can miss today's incomplete session and understate
+  a +8% day). Missing day % is **fail-closed** (no BUY_TO_OPEN without it).
+
+### Stock trading pause
+- `STOCKS_TRADING_ENABLED=false` (default) pauses tilt + LLM stock analyze +
+  stock news/position jobs. Options keep running. Set `true` to re-enable.

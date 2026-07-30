@@ -213,3 +213,55 @@ def test_filter_chase_candidates_drops_extension_side(monkeypatch):
     assert kept_keys == {"tsla-p", "aapl-c"}  # fade put + small green call
     assert dropped_keys == {"tsla-c", "nvda-p"}  # chase call + chase put
     get_settings.cache_clear()
+
+
+def test_options_chase_gate_fail_closed_when_day_pct_missing(monkeypatch):
+    """Missing day % must not silently allow BUY_TO_OPEN (ORCL-style slip)."""
+    monkeypatch.setenv("OPTIONS_MAX_INTRADAY_CHASE_PCT", "2.5")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    rec = {
+        "ticker": "ORCL",
+        "action": "BUY_TO_OPEN",
+        "right": "call",
+        "contracts": 1,
+        "premium": 6.0,
+        "investment": 600,
+        "max_loss": 600,
+        "confidence": 80,
+        "risk": "MEDIUM",
+        "risk_notes": [],
+        "reasoning": [],
+    }
+    out = apply_options_chase_gate(rec, {})  # empty day_moves
+    assert out["action"] == "HOLD"
+    assert out["chase_blocked"] is True
+    assert out["investment"] == 0
+    assert any("unavailable" in n.lower() or "fail-closed" in n.lower() for n in out["risk_notes"])
+    get_settings.cache_clear()
+
+
+def test_options_chase_gate_blocks_orcl_style_extension(monkeypatch):
+    monkeypatch.setenv("OPTIONS_MAX_INTRADAY_CHASE_PCT", "2.5")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    rec = {
+        "ticker": "ORCL",
+        "action": "BUY_TO_OPEN",
+        "right": "call",
+        "contracts": 1,
+        "premium": 7.0,
+        "investment": 700,
+        "max_loss": 700,
+        "confidence": 85,
+        "risk": "MEDIUM",
+        "risk_notes": [],
+        "reasoning": ["momentum"],
+    }
+    out = apply_options_chase_gate(rec, {"ORCL": 8.0})
+    assert out["action"] == "HOLD"
+    assert out["chase_blocked"] is True
+    assert out["day_pct"] == 8.0
+    get_settings.cache_clear()

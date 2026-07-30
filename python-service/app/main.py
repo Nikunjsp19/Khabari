@@ -334,6 +334,15 @@ def tilt_rebalance(force: bool = True, send: bool = True) -> dict[str, Any]:
 
     force=true does a full rebalance regardless of the monthly cadence.
     """
+    settings = get_settings()
+    if not settings.stocks_trading_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "stocks_trading_paused",
+                "message": "Stock trading is paused (STOCKS_TRADING_ENABLED=false). Set true to re-enable.",
+            },
+        )
     from app.tilt import run_tilt_rebalance
 
     return serialize_mongo(run_tilt_rebalance(force=force, send_notification=send))
@@ -432,6 +441,15 @@ def analyze(body: AnalyzeRequest | None = None) -> dict[str, Any]:
     Also respects free-tier daily Gemini budget unless force=true.
     """
     body = body or AnalyzeRequest()
+    settings = get_settings()
+    if not settings.stocks_trading_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "stocks_trading_paused",
+                "message": "Stock trading is paused (STOCKS_TRADING_ENABLED=false). Set true to re-enable.",
+            },
+        )
     if not body.force and not is_market_hours():
         raise HTTPException(
             status_code=403,
