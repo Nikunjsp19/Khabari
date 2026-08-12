@@ -158,9 +158,9 @@ def execute_recommendation(
         old_cost = float(existing.get("avg_cost", 0))
         new_shares = old_shares + shares
         new_avg = ((old_shares * old_cost) + spend) / new_shares if new_shares else price
-        positions[ticker] = {"shares": round(new_shares, 6), "avg_cost": round(new_avg, 4)}
+        positions[ticker] = {"shares": round(new_shares, 3), "avg_cost": round(new_avg, 4)}
         cash = round(cash - spend, 2)
-        trade.update({"shares": round(shares, 6), "price": price, "dollars": round(spend, 2)})
+        trade.update({"shares": round(shares, 3), "price": price, "dollars": round(spend, 2)})
 
     elif action == "SELL":
         existing = positions.get(ticker)
@@ -179,11 +179,11 @@ def execute_recommendation(
             positions.pop(ticker, None)
         else:
             positions[ticker] = {
-                "shares": round(remaining, 6),
+                "shares": round(remaining, 3),
                 "avg_cost": float(existing.get("avg_cost", price)),
             }
         cash = round(cash + proceeds, 2)
-        trade.update({"shares": round(shares_to_sell, 6), "price": price, "dollars": proceeds})
+        trade.update({"shares": round(shares_to_sell, 3), "price": price, "dollars": proceeds})
 
     else:
         raise ValueError(f"Unsupported action: {action}")
@@ -230,7 +230,7 @@ def _reverse_trade(
         else:
             basis = owned * avg - dollars
             next_positions[ticker] = {
-                "shares": round(remaining, 6),
+                "shares": round(remaining, 3),
                 "avg_cost": round(basis / remaining, 4),
             }
     elif action == "SELL":
@@ -241,7 +241,7 @@ def _reverse_trade(
         owned = float(existing.get("shares", 0))
         avg = float(existing.get("avg_cost") or price)
         next_positions[ticker] = {
-            "shares": round(owned + shares, 6),
+            "shares": round(owned + shares, 3),
             "avg_cost": avg if owned > 0 else round(price or avg, 4),
         }
     else:
@@ -311,9 +311,9 @@ def update_recommendation_trade(
         old_cost = float(existing.get("avg_cost", 0))
         new_shares = old_shares + shares
         new_avg = ((old_shares * old_cost) + spend) / new_shares if new_shares else price
-        positions[ticker] = {"shares": round(new_shares, 6), "avg_cost": round(new_avg, 4)}
+        positions[ticker] = {"shares": round(new_shares, 3), "avg_cost": round(new_avg, 4)}
         cash = round(cash - spend, 2)
-        trade.update({"shares": round(shares, 6), "price": price, "dollars": spend})
+        trade.update({"shares": round(shares, 3), "price": price, "dollars": spend})
     else:
         existing = positions.get(ticker)
         if not existing or float(existing.get("shares", 0)) <= 0:
@@ -326,11 +326,11 @@ def update_recommendation_trade(
             positions.pop(ticker, None)
         else:
             positions[ticker] = {
-                "shares": round(remaining, 6),
+                "shares": round(remaining, 3),
                 "avg_cost": float(existing.get("avg_cost", price)),
             }
         cash = round(cash + proceeds, 2)
-        trade.update({"shares": round(shares_to_sell, 6), "price": price, "dollars": proceeds})
+        trade.update({"shares": round(shares_to_sell, 3), "price": price, "dollars": proceeds})
 
     save_portfolio(cash, positions, source="trade_correct")
     get_db().trades.insert_one({**trade, "saved_at": _now()})

@@ -230,7 +230,7 @@ DESK_HTML = """<!DOCTYPE html>
             if (ind.price) {
               priceInput.value = ind.price;
               if (sharesInput && d.investment && Number(ind.price) > 0) {
-                sharesInput.value = (Math.round((d.investment / ind.price) * 1e6) / 1e6);
+                sharesInput.value = (Math.round((d.investment / ind.price) * 1e3) / 1e3);
               }
             }
           }).catch(() => {});
