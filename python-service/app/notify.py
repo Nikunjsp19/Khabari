@@ -114,6 +114,24 @@ def format_options_recommendation_message(
         )
     sync_line = f"\n\nAfter you trade, confirm in Hisaab:\n{desk}"
 
+    if rec.get("chase_gated"):
+        ticker = rec.get("gate_original_ticker") or rec.get("ticker") or "scan"
+        day_pct = rec.get("day_pct")
+        pct_txt = f" ({day_pct:+.2f}% today)" if day_pct is not None else ""
+        bullets = "\n".join(f"• {r}" for r in reasons) or "• (none)"
+        header = "🚨 *Options scan*" if markdown else "Options scan"
+        body = (
+            f"*HOLD* — chase blocked on {ticker}{pct_txt}\n"
+            if markdown
+            else f"HOLD — chase blocked on {ticker}{pct_txt}\n"
+        )
+        return (
+            f"{header}\n\n"
+            f"{body}"
+            f"{'*Reasons:*' if markdown else 'Reasons:'}\n{bullets}\n"
+            f"Options cash left: ${rec.get('remaining_cash', '—')}"
+        )
+
     if markdown:
         bullets = "\n".join(f"• {r}" for r in reasons) or "• (none)"
         chase = ""
@@ -381,8 +399,16 @@ def notify_options_recommendation(
     )
     right = (rec.get("right") or "").upper()
     action = str(rec.get("action") or "HOLD").upper()
-    if action == "HOLD":
+    if action == "HOLD" and rec.get("chase_gated"):
+        ticker = rec.get("gate_original_ticker") or rec.get("ticker") or "scan"
+        title = f"OPT HOLD - chase blocked ({ticker})"
+    elif action == "HOLD":
         title = f"OPT HOLD - no trade ({rec.get('ticker') or 'scan'})"
+    elif action == "SELL_TO_CLOSE":
+        title = (
+            f"SELL NOW — {rec.get('ticker')} {right} "
+            f"${rec.get('strike')} x{rec.get('contracts')}"
+        )
     else:
         title = (
             f"OPT {action} {rec.get('ticker')} {right} "
@@ -391,12 +417,19 @@ def notify_options_recommendation(
 
     if settings.ntfy_topic:
         try:
+            tags = (
+                "warning,rotating_light,moneybag"
+                if action == "SELL_TO_CLOSE"
+                else "chart_with_upwards_trend,zap"
+            )
+            priority = "high" if action == "SELL_TO_CLOSE" else "default"
             results["sent"].append(
                 send_ntfy(
                     title,
                     plain,
                     click_url=desk,
-                    tags="chart_with_upwards_trend,zap",
+                    tags=tags,
+                    priority=priority,
                 )
             )
         except Exception as exc:  # noqa: BLE001

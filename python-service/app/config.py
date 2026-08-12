@@ -8,10 +8,13 @@ class Settings(BaseSettings):
 
     mongodb_uri: str = ""
     mongodb_db: str = "Khabari"
-    # Stock universe — famous/liquid + high-vol movers (system-managed when auto)
+    # Stock universe — liquid names + 2x/1x single-stock bull/bear ETFs
     watchlist: str = (
-        "SPY,QQQ,AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,AMD,AVGO,JPM,BAC,GS,NFLX,TSM,"
-        "HOOD,PLTR,NOW,MSTR,COIN,SMCI,ARM,RDDT"
+        "SPY,QQQ,AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,AMD,AVGO,JPM",
+        "BAC,GS,NFLX,TSM,HOOD,ORCL,PLTR,NOW,MSTR,COIN,SMCI,ARM",
+        "RDDT,TSLL,METU,NVDU,NVDL,AAPU,AMZU,MSFU,GGLL,AMUU,AMDL,AVL",
+        "NFXL,ORCU,PLTU,HODU,CONX,CONL,MSTU,QQQU,FNGG,TSLS,TSDD,METD",
+        "NVDD,NVD,AAPD,AMZD,MSFD,GGLS,AMDD,AVS,NFXS,ORCS,PLTD"
     )
     watchlist_auto_famous: bool = True
     initial_cash: float = 1000.0
@@ -19,9 +22,9 @@ class Settings(BaseSettings):
     # LLM — Gemini is default
     llm_provider: str = "gemini"
     gemini_api_key: str = ""
-    gemini_model: str = "gemini-3.1-flash-lite"
+    gemini_model: str = "gemini-3.5-flash"
     # Comma-separated fallbacks used immediately on 503/overload (same analyze run)
-    gemini_fallback_models: str = "gemini-2.5-flash-lite,gemini-flash-latest"
+    gemini_fallback_models: str = "gemini-3.5-flash-lite,gemini-2.5-flash"
     openai_api_key: str = ""
     openai_model: str = "gpt-4o-mini"
 
@@ -76,13 +79,14 @@ class Settings(BaseSettings):
     # --- Momentum-tilt engine (primary stock strategy; beats the timing engine) ---
     # Stays fully invested in the top-N momentum names, rebalanced monthly, with a
     # 200d-SMA trend brake. Validated vs SPY in app/backtest.py::run_tilt_backtest.
-    # When enabled it REPLACES the LLM buy/sell-timing analyze + ATR exit engine for
-    # stocks (same notify → manual trade → confirm-in-Hisaab workflow). Set
-    # TILT_ENABLED=false to fall back to the old LLM/exit engine.
+    # When enabled it REPLACES the LLM buy/sell-timing analyze for stocks
+    # (same notify → manual trade → confirm-in-Hisaab workflow). ATR stop/trail
+    # SELL alerts still run via EXIT_ENGINE_ENABLED. Set TILT_ENABLED=false to
+    # fall back to the old LLM timing engine.
     #
-    # Master pause for ALL stock trading jobs (tilt + LLM analyze + news/position
-    # stock monitors). Options keep running. Set true when you want stock pings again.
-    stocks_trading_enabled: bool = False
+    # Master pause for ALL stock trading jobs (tilt + exit monitor). Options are
+    # controlled separately via OPTIONS_SCHEDULER_ENABLED.
+    stocks_trading_enabled: bool = True
     tilt_enabled: bool = True
     tilt_top_n: int = 10                    # equal-weight slots
     tilt_require_uptrend: bool = True       # only hold names above their 200d SMA
@@ -90,10 +94,15 @@ class Settings(BaseSettings):
     tilt_rebalance_band_pct: float = 0.25   # only trim/add a hold when it drifts > this
     tilt_min_trade_usd: float = 20.0        # skip dust trades below this
     # Ranking universe (comma-separated). Empty → use the active watchlist.
+    # Includes 2x bull / inverse single-stock ETFs (TSLL, METU, NVDL, …).
     tilt_universe: str = (
-        "AAPL,MSFT,GOOGL,AMZN,META,NVDA,AVGO,ORCL,ADBE,CRM,AMD,QCOM,TXN,INTC,MU,"
-        "COST,WMT,HD,MCD,NKE,SBUX,PG,KO,PEP,JPM,BAC,V,MA,GS,UNH,JNJ,LLY,ABBV,MRK,"
-        "CAT,GE,XOM,CVX,NFLX,DIS,TSLA,LIN,HON"
+        "AAPL,MSFT,GOOGL,AMZN,META,NVDA,AVGO,ORCL,ADBE,CRM,AMD,QCOM",
+        "TXN,INTC,MU,COST,WMT,HD,MCD,NKE,SBUX,PG,KO,PEP",
+        "JPM,BAC,V,MA,GS,UNH,JNJ,LLY,ABBV,MRK,CAT,GE",
+        "XOM,CVX,NFLX,DIS,TSLA,LIN,HON,TSLL,METU,NVDU,NVDL,AAPU",
+        "AMZU,MSFU,GGLL,AMUU,AMDL,AVL,NFXL,ORCU,PLTU,HODU,CONX,CONL",
+        "MSTU,QQQU,FNGG,TSLS,TSDD,METD,NVDD,NVD,AAPD,AMZD,MSFD,GGLS",
+        "AMDD,AVS,NFXS,ORCS,PLTD"
     )
 
     # --- Deterministic exit engine (ATR trailing / initial / time stops) ---
@@ -131,7 +140,7 @@ class Settings(BaseSettings):
     # --- Options (separate paper book; Yahoo/yfinance chains, estimated delta) ---
     options_watchlist: str = "TSLA,NVDA,AAPL,MSFT,AMZN"
     options_initial_cash: float = 1000.0
-    options_min_notify_confidence: float = 65.0
+    options_min_notify_confidence: float = 72.0
     options_max_premium_pct: float = 0.40  # max premium at risk per trade vs options NAV
     options_min_cash_pct: float = 0.05
     options_min_dte: int = 7
@@ -144,9 +153,14 @@ class Settings(BaseSettings):
     options_put_delta_min: float = -0.60
     options_put_delta_max: float = -0.30
     options_max_candidates_per_ticker: int = 8
-    options_take_profit_pct: float = 40.0  # premium % gain
-    options_stop_loss_pct: float = 35.0  # premium % loss
-    options_scheduler_enabled: bool = True
+    options_take_profit_pct: float = 25.0  # premium % gain — ping SELL NOW
+    options_stop_loss_pct: float = 25.0  # premium % loss — ping SELL NOW
+    # Force SELL alert when DTE falls to this (theta / don't hold into expiry)
+    options_exit_time_stop_dte: int = 1
+    options_exit_alert_cooldown_minutes: float = 45.0
+    # How often to mark open options vs TP/SL (minutes)
+    options_position_monitor_minutes: int = 15
+    options_scheduler_enabled: bool = False  # stocks-only by default
     options_backup_analyze_hours: int = 1  # hourly during market window
     # Soft gap for options hourly job vs shared stock analyze cooldown
     options_analyze_min_gap_minutes: float = 20.0

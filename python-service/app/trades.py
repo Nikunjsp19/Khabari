@@ -50,21 +50,45 @@ def mark_recommendation(rec_id: str, status: str, extra: dict[str, Any] | None =
     )
 
 
+def _stored_price_if_fresh(ticker: str, *, max_age_minutes: float = 30.0) -> float | None:
+    """Use Mongo indicator cache only when recent — otherwise it mis-prices exits."""
+    stored = get_db().prices.find_one({"ticker": ticker}, sort=[("saved_at", -1)])
+    if not stored or not stored.get("price"):
+        return None
+    saved_at = stored.get("saved_at")
+    if saved_at is not None:
+        if getattr(saved_at, "tzinfo", None) is None:
+            saved_at = saved_at.replace(tzinfo=timezone.utc)
+        age_min = (_now() - saved_at).total_seconds() / 60.0
+        if age_min > max_age_minutes:
+            logger.warning(
+                "Ignoring stale stored price for %s (%.0fm old, $%s)",
+                ticker,
+                age_min,
+                stored.get("price"),
+            )
+            return None
+    return float(stored["price"])
+
+
 def fetch_last_price(ticker: str) -> float:
     ticker = ticker.upper()
-    # Prefer latest stored price
-    stored = get_db().prices.find_one({"ticker": ticker}, sort=[("saved_at", -1)])
-    if stored and stored.get("price"):
-        return float(stored["price"])
+    # Always prefer a live quote — stored prices come from analyze runs and go stale fast.
+    try:
+        t = yf.Ticker(ticker)
+        hist = t.history(period="1d", interval="1m")
+        if hist is not None and not hist.empty:
+            return float(hist["Close"].iloc[-1])
+        info = t.fast_info
+        price = getattr(info, "last_price", None) or getattr(info, "lastPrice", None)
+        if price:
+            return float(price)
+    except Exception:  # noqa: BLE001
+        logger.warning("Live price fetch failed for %s", ticker, exc_info=True)
 
-    t = yf.Ticker(ticker)
-    hist = t.history(period="1d", interval="1m")
-    if hist is not None and not hist.empty:
-        return float(hist["Close"].iloc[-1])
-    info = t.fast_info
-    price = getattr(info, "last_price", None) or getattr(info, "lastPrice", None)
-    if price:
-        return float(price)
+    cached = _stored_price_if_fresh(ticker)
+    if cached is not None:
+        return cached
     raise RuntimeError(f"Could not fetch price for {ticker}")
 
 

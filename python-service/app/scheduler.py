@@ -386,7 +386,19 @@ def _watchdog_job() -> None:
             )
             _maybe_options_analyze("watchdog", force_cooldown=True)
 
-    # Stocks (tilt): only a couple cron slots/day — if morning slot was missed, run once
+            _maybe_options_analyze("watchdog", force_cooldown=True)
+
+        # Always re-check open options for TP/SL while market is open
+        try:
+            from app.db import get_latest_options_portfolio
+
+            book = get_latest_options_portfolio()
+            if book.get("positions"):
+                _options_position_monitor_job()
+        except Exception:  # noqa: BLE001
+            logger.exception("Watchdog options exit check failed")
+
+    # Stocks (tilt): if morning slot was missed after wake, run once
     if settings.stocks_trading_enabled and settings.tilt_enabled:
         from app.market_hours import now_market
 
@@ -406,8 +418,20 @@ def _watchdog_job() -> None:
             logger.warning("Watchdog: no tilt run yet today — forcing tilt job")
             _tilt_job()
 
+    # Stock exits: re-check open positions for stop/trail hits after sleep gaps
+    if settings.stocks_trading_enabled and settings.exit_engine_enabled:
+        try:
+            from app.db import get_latest_portfolio
+
+            book = get_latest_portfolio()
+            if book.get("positions"):
+                _position_monitor_job()
+        except Exception:  # noqa: BLE001
+            logger.exception("Watchdog stock exit check failed")
+
 
 def _options_position_monitor_job() -> None:
+    """Deterministic options exits: SELL NOW on TP/SL/near-expiry (no LLM)."""
     global _last_options_position_check
     status = market_hours_status()
     if not is_market_hours():
@@ -418,18 +442,23 @@ def _options_position_monitor_job() -> None:
         }
         return
     try:
-        from app.options_trades import options_positions_need_review
+        from app.options_exits import run_options_exit_monitor
 
-        review = options_positions_need_review()
-        _last_options_position_check = {"ok": True, "status": status, **review}
-        if not review.get("needed"):
-            logger.info("Options position monitor: no exit bands hit")
+        result = run_options_exit_monitor(send_notification=True)
+        _last_options_position_check = {"ok": True, "status": status, **result}
+        if not result.get("needed"):
+            logger.info(
+                "Options exit engine: no TP/SL/time hits (%s positions)",
+                result.get("positions"),
+            )
             return
-        logger.info("Options position monitor trigger: %s", review.get("reasons"))
-        analyze_result = _maybe_options_analyze("position_monitor")
-        _last_options_position_check["analyze"] = analyze_result
+        logger.info(
+            "Options exit engine fired %s SELL alert(s): %s",
+            len(result.get("alerted") or []),
+            [a.get("key") for a in (result.get("alerted") or [])],
+        )
     except Exception as exc:  # noqa: BLE001
-        logger.exception("Options position monitor failed")
+        logger.exception("Options exit engine failed")
         _last_options_position_check = {"ok": False, "error": str(exc), "status": status}
 
 
@@ -628,19 +657,16 @@ def start_scheduler() -> BackgroundScheduler | None:
     backup_hour_expr = ",".join(str(h) for h in sorted(set(backup_hours)))
 
     if settings.stocks_trading_enabled and settings.tilt_enabled:
-        # Momentum tilt is the primary stock engine: it replaces the LLM
-        # buy/sell-timing analyze (backup + news-triggered) AND the ATR exit
-        # engine, because the tilt has its own monthly rebalance + trend brake.
-        # Run a few times across the session so a mid-session start / VM wake
-        # still triggers the monthly rebalance and the daily trend-brake check.
-        tilt_hours = sorted(
-            {settings.market_start_hour, (settings.market_start_hour + settings.market_end_hour) // 2}
-        )
+        # Momentum tilt is the primary stock ENTRY engine: it replaces the LLM
+        # buy/sell-timing analyze (backup + news-triggered). Trend-brake SELLs
+        # (below 200d SMA) run here; stop-loss / trailing-stop SELLs still come
+        # from the ATR exit engine below — otherwise buys never get timely exits.
+        # Hourly during the session so mid-day breaks and VM wakes still catch up.
         sched.add_job(
             _tilt_job,
             CronTrigger(
                 day_of_week="mon-fri",
-                hour=",".join(str(h) for h in tilt_hours),
+                hour=hour_window,
                 minute=5,
                 timezone=settings.market_timezone,
             ),
@@ -671,6 +697,10 @@ def start_scheduler() -> BackgroundScheduler | None:
             id="khabari_news_scan",
             replace_existing=True,
         )
+
+    # Always schedule stock exit monitor when enabled — tilt alone only sells on
+    # 200d trend brake / monthly rank drop, which is too slow for stop-loss pings.
+    if settings.stocks_trading_enabled and settings.exit_engine_enabled:
         sched.add_job(
             _position_monitor_job,
             CronTrigger(
@@ -682,7 +712,7 @@ def start_scheduler() -> BackgroundScheduler | None:
             id="khabari_position_monitor",
             replace_existing=True,
         )
-    else:
+    elif not settings.stocks_trading_enabled:
         logger.info(
             "Stock trading jobs paused (STOCKS_TRADING_ENABLED=false) — options only"
         )
@@ -726,7 +756,9 @@ def start_scheduler() -> BackgroundScheduler | None:
             CronTrigger(
                 day_of_week="mon-fri",
                 hour=hour_window,
-                minute=_cron_minute_expr(settings.position_monitor_minutes, minimum=15),
+                minute=_cron_minute_expr(
+                    settings.options_position_monitor_minutes, minimum=10
+                ),
                 timezone=settings.market_timezone,
             ),
             id="khabari_options_position_monitor",
@@ -864,6 +896,10 @@ def scheduler_status() -> dict[str, Any]:
             "options_min_notify_confidence": settings.options_min_notify_confidence,
             "options_backup_analyze_hours": settings.options_backup_analyze_hours,
             "options_analyze_min_gap_minutes": settings.options_analyze_min_gap_minutes,
+            "options_take_profit_pct": settings.options_take_profit_pct,
+            "options_stop_loss_pct": settings.options_stop_loss_pct,
+            "options_exit_time_stop_dte": settings.options_exit_time_stop_dte,
+            "options_position_monitor_minutes": settings.options_position_monitor_minutes,
             "scheduler_watchdog_minutes": settings.scheduler_watchdog_minutes,
             "scheduler_misfire_grace_seconds": settings.scheduler_misfire_grace_seconds,
             "options_auto_movers": settings.options_auto_movers,
