@@ -9,11 +9,12 @@ class Settings(BaseSettings):
     mongodb_uri: str = ""
     mongodb_db: str = "Khabari"
     # Stock universe — liquid names + 2x/1x single-stock bull/bear ETFs
+    # Adjacent string literals (no commas between them) concatenate into one str.
     watchlist: str = (
-        "SPY,QQQ,AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,AMD,AVGO,JPM",
-        "BAC,GS,NFLX,TSM,HOOD,ORCL,PLTR,NOW,MSTR,COIN,SMCI,ARM",
-        "RDDT,TSLL,METU,NVDU,NVDL,AAPU,AMZU,MSFU,GGLL,AMUU,AMDL,AVL",
-        "NFXL,ORCU,PLTU,HODU,CONX,CONL,MSTU,QQQU,FNGG,TSLS,TSDD,METD",
+        "SPY,QQQ,AAPL,MSFT,NVDA,AMZN,GOOGL,META,TSLA,AMD,AVGO,JPM,"
+        "BAC,GS,NFLX,TSM,HOOD,ORCL,PLTR,NOW,MSTR,COIN,SMCI,ARM,"
+        "RDDT,TSLL,METU,NVDU,NVDL,AAPU,AMZU,MSFU,GGLL,AMUU,AMDL,AVL,"
+        "NFXL,ORCU,PLTU,HODU,CONX,CONL,MSTU,QQQU,FNGG,TSLS,TSDD,METD,"
         "NVDD,NVD,AAPD,AMZD,MSFD,GGLS,AMDD,AVS,NFXS,ORCS,PLTD"
     )
     watchlist_auto_famous: bool = True
@@ -96,12 +97,12 @@ class Settings(BaseSettings):
     # Ranking universe (comma-separated). Empty → use the active watchlist.
     # Includes 2x bull / inverse single-stock ETFs (TSLL, METU, NVDL, …).
     tilt_universe: str = (
-        "AAPL,MSFT,GOOGL,AMZN,META,NVDA,AVGO,ORCL,ADBE,CRM,AMD,QCOM",
-        "TXN,INTC,MU,COST,WMT,HD,MCD,NKE,SBUX,PG,KO,PEP",
-        "JPM,BAC,V,MA,GS,UNH,JNJ,LLY,ABBV,MRK,CAT,GE",
-        "XOM,CVX,NFLX,DIS,TSLA,LIN,HON,TSLL,METU,NVDU,NVDL,AAPU",
-        "AMZU,MSFU,GGLL,AMUU,AMDL,AVL,NFXL,ORCU,PLTU,HODU,CONX,CONL",
-        "MSTU,QQQU,FNGG,TSLS,TSDD,METD,NVDD,NVD,AAPD,AMZD,MSFD,GGLS",
+        "AAPL,MSFT,GOOGL,AMZN,META,NVDA,AVGO,ORCL,ADBE,CRM,AMD,QCOM,"
+        "TXN,INTC,MU,COST,WMT,HD,MCD,NKE,SBUX,PG,KO,PEP,"
+        "JPM,BAC,V,MA,GS,UNH,JNJ,LLY,ABBV,MRK,CAT,GE,"
+        "XOM,CVX,NFLX,DIS,TSLA,LIN,HON,TSLL,METU,NVDU,NVDL,AAPU,"
+        "AMZU,MSFU,GGLL,AMUU,AMDL,AVL,NFXL,ORCU,PLTU,HODU,CONX,CONL,"
+        "MSTU,QQQU,FNGG,TSLS,TSDD,METD,NVDD,NVD,AAPD,AMZD,MSFD,GGLS,"
         "AMDD,AVS,NFXS,ORCS,PLTD"
     )
 
