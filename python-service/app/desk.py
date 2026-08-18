@@ -117,6 +117,12 @@ DESK_HTML = """<!DOCTYPE html>
   <script>
     const params = new URLSearchParams(location.search);
     const id = params.get('id');
+    // Several engines share one cash pool, so every card names its source.
+    const STRATEGY_LABELS = {
+      momentum_tilt: 'Momentum Tilt',
+      mean_reversion: 'Connors Swing',
+      exit_engine: 'ATR Exit',
+    };
     let tab = (params.get('tab') || 'stocks').toLowerCase();
     if (tab !== 'options') tab = 'stocks';
 
@@ -163,6 +169,15 @@ DESK_HTML = """<!DOCTYPE html>
     async function loadPortfolio() {
       const p = await fetch('/portfolio/marked').then(r => r.json());
       let html = `<div class="meta">Cash: $${Number(p.cash).toFixed(2)} · Total: $${Number(p.total_value).toFixed(2)}</div>`;
+      try {
+        const s = await fetch('/strategies').then(r => r.json());
+        for (const st of (s.strategies || [])) {
+          const owns = (st.owns || []).join(', ') || 'cash';
+          html += `<div class="meta">${st.label}: ${st.sleeve_pct}% sleeve`
+            + (st.sleeve_budget != null ? ` ($${Number(st.sleeve_budget).toFixed(0)})` : '')
+            + ` · ${owns}</div>`;
+        }
+      } catch (e) {}
       const keys = Object.keys(p.positions || {});
       if (!keys.length) {
         html += '<p class="meta">No open positions yet.</p>';
@@ -195,6 +210,7 @@ DESK_HTML = """<!DOCTYPE html>
         : '';
       card.innerHTML = `
         <div class="action ${d.action}">${d.action} ${d.ticker}</div>
+        <div class="meta">Strategy: ${STRATEGY_LABELS[d.strategy || d.signal_source] || 'AI Analyst'} · ${d.time_horizon || '—'}</div>
         <div class="meta">Invest $${d.investment} · Confidence ${d.confidence}% · Risk ${d.risk} · Status: ${d.status || 'pending'}</div>
         ${recorded}
         <ul>${reasons}</ul>

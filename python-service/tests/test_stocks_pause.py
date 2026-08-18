@@ -46,8 +46,19 @@ def test_trigger_tilt_now_skipped_while_paused():
     assert out["reason"] == "stocks_trading_paused"
 
 
+def test_mean_reversion_skipped_while_paused():
+    from app.mean_reversion import run_mean_reversion
+
+    out = run_mean_reversion(send_notification=True)
+    assert out["skipped"] is True
+    assert out["reason"] == "stocks_trading_paused"
+
+
 def test_scheduler_jobs_exclude_stock_jobs_while_paused(monkeypatch):
     monkeypatch.setenv("SCHEDULER_ENABLED", "true")
+    # Set the options flag explicitly: the deployed .env has options switched off,
+    # and this test is about the stock pause not taking options down with it.
+    monkeypatch.setenv("OPTIONS_SCHEDULER_ENABLED", "true")
     from app.config import get_settings
 
     get_settings.cache_clear()
@@ -61,6 +72,7 @@ def test_scheduler_jobs_exclude_stock_jobs_while_paused(monkeypatch):
         assert "khabari_backup_analyze" not in job_ids
         assert "khabari_position_monitor" not in job_ids
         assert "khabari_day_wrap" not in job_ids
+        assert "khabari_mean_reversion" not in job_ids
         # Options must keep running
         assert "khabari_options_backup_analyze" in job_ids
     finally:

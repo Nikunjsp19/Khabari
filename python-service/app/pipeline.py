@@ -122,7 +122,10 @@ def run_analysis(
         "mandate": (
             "SHORT-TERM + moderately aggressive growth (hours to a few days). "
             "You are CONFIRMING a pre-screened short-list from a deterministic quant engine. "
-            "Only BUY names in 'candidates'; pick the single best or HOLD if none is compelling."
+            "Only BUY names in 'candidates'; pick the single best or HOLD if none is compelling. "
+            "quant_signals.progo_regime is Larry Williams ProGo: accumulation = desks "
+            "buying the close (confirm the long); distribution = public paying the gap "
+            "(do not chase)."
         ),
         "open_positions_note": (
             "If positions exist, consider SELL/HOLD for them based on short-term P&L and momentum. "

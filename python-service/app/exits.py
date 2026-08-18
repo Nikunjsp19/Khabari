@@ -135,15 +135,21 @@ def _seed_or_update(
 
 def evaluate_exits(marked: dict[str, Any] | None = None) -> dict[str, Any]:
     """Evaluate every open stock position against the deterministic exit rules."""
+    from app.strategy_book import claimed_by_others
     from app.trades import portfolio_with_marks
 
     settings = get_settings()
     marked = marked or portfolio_with_marks()
-    positions = marked.get("positions") or {}
+    all_positions = marked.get("positions") or {}
+    # Strategies that run their own exit rules (e.g. RSI(2) reclaiming the
+    # 5-day SMA) must not also be stopped out by the ATR engine.
+    foreign = claimed_by_others("momentum_tilt")
+    positions = {t: p for t, p in all_positions.items() if t.upper() not in foreign}
     state = load_position_state()
 
-    # Drop state for tickers no longer held
-    for stale in [t for t in state if t not in positions]:
+    # Drop state for tickers no longer held. Checked against *all* positions so a
+    # ticker temporarily owned by another strategy keeps its high-water mark.
+    for stale in [t for t in state if t not in all_positions]:
         state.pop(stale, None)
 
     exits: list[dict[str, Any]] = []

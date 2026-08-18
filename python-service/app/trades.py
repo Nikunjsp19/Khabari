@@ -153,6 +153,34 @@ def execute_recommendation(
             raise ValueError("Trade amount must be at least $1")
         if spend > cash + 0.01:
             raise ValueError(f"Not enough cash: need ${spend:.2f}, have ${cash:.2f}")
+        strategy = str(rec.get("strategy") or "").strip()
+        if strategy:
+            try:
+                from app.strategy_book import owned_holdings, sleeve_state
+
+                nav = cash
+                for pos in positions.values():
+                    nav += float((pos or {}).get("shares") or 0) * float(
+                        (pos or {}).get("avg_cost") or 0
+                    )
+                sleeve = sleeve_state(
+                    strategy,
+                    cash=cash,
+                    total_value=nav,
+                    positions=positions,
+                    owned=owned_holdings(strategy, positions),
+                )
+                if spend > float(sleeve["available_cash"]) + 0.01:
+                    raise ValueError(
+                        f"{strategy} sleeve is full: need ${spend:.2f}, "
+                        f"sleeve room ${sleeve['available_cash']:.2f} "
+                        f"({sleeve['pct']:g}% of book, "
+                        f"${sleeve['invested']:.0f} already invested)"
+                    )
+            except ValueError:
+                raise
+            except Exception:  # noqa: BLE001
+                logger.warning("Sleeve check failed for %s", ticker, exc_info=True)
         existing = positions.get(ticker) or {"shares": 0.0, "avg_cost": 0.0}
         old_shares = float(existing.get("shares", 0))
         old_cost = float(existing.get("avg_cost", 0))
@@ -191,6 +219,19 @@ def execute_recommendation(
     save_portfolio(cash, positions, source="trade_confirm")
     get_db().trades.insert_one({**trade, "saved_at": _now()})
     mark_recommendation(rec_id, "executed", {"trade": trade, "fill_price": price})
+
+    # Record/clear which strategy owns this ticker so the engines don't trade
+    # over each other. Never let bookkeeping fail a confirmed trade.
+    try:
+        from app.strategy_book import claim, release
+
+        strategy = str(rec.get("strategy") or "").strip()
+        if action == "BUY" and strategy:
+            claim(ticker, strategy, rec_id=rec_id)
+        elif action == "SELL" and ticker not in positions:
+            release(ticker)
+    except Exception:  # noqa: BLE001
+        logger.warning("Strategy book update failed for %s", ticker, exc_info=True)
 
     return {
         "ok": True,

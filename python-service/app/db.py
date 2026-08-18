@@ -53,6 +53,8 @@ def ensure_indexes() -> None:
     db.watchlist.create_index("ticker", unique=True)
     db.trades.create_index([("ts", DESCENDING)])
     db.meta.create_index("updated_at")
+    # One owner per ticker so parallel strategies don't exit each other's trades
+    db.strategy_positions.create_index("strategy")
     # Options twin collections
     db.options_watchlist.create_index("ticker", unique=True)
     db.options_portfolio.create_index([("ts", DESCENDING)])

@@ -542,6 +542,7 @@ def _position_monitor_job() -> None:
 
 
 _last_tilt_run: dict[str, Any] | None = None
+_last_mean_reversion_run: dict[str, Any] | None = None
 
 
 def _tilt_job() -> None:
@@ -592,6 +593,51 @@ def trigger_tilt_now(force: bool = True) -> dict[str, Any]:
     from app.tilt import run_tilt_rebalance
 
     return run_tilt_rebalance(force=force, send_notification=True)
+
+
+def _mean_reversion_job() -> None:
+    """Connors RSI(2) dip engine — runs once a day near the close.
+
+    The signal is defined on the closing print, so scanning at midday would act
+    on a bar that has not happened yet. Running late leaves enough time to place
+    the order before the bell (Connors fills at the next open).
+    """
+    global _last_mean_reversion_run
+    settings = get_settings()
+    if not settings.stocks_trading_enabled:
+        _last_mean_reversion_run = {
+            "skipped": True,
+            "reason": "stocks_trading_paused",
+            "status": market_hours_status(),
+        }
+        return
+    status = market_hours_status()
+    try:
+        from app.mean_reversion import run_mean_reversion
+
+        result = run_mean_reversion(send_notification=True)
+        _last_mean_reversion_run = {"status": status, **result}
+        if result.get("emitted"):
+            logger.info(
+                "Mean reversion job: %s signal(s) — %s",
+                len(result.get("emitted") or []),
+                [e.get("ticker") for e in (result.get("emitted") or [])],
+            )
+        else:
+            logger.info("Mean reversion job: no setups today")
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("Mean reversion job failed")
+        _last_mean_reversion_run = {"ok": False, "error": str(exc), "status": status}
+
+
+def trigger_mean_reversion_now() -> dict[str, Any]:
+    """Run the RSI(2) engine immediately (API/ops)."""
+    settings = get_settings()
+    if not settings.stocks_trading_enabled:
+        return {"skipped": True, "reason": "stocks_trading_paused"}
+    from app.mean_reversion import run_mean_reversion
+
+    return run_mean_reversion(send_notification=True)
 
 
 def _day_wrap_job() -> None:
@@ -695,6 +741,22 @@ def start_scheduler() -> BackgroundScheduler | None:
                 timezone=settings.market_timezone,
             ),
             id="khabari_news_scan",
+            replace_existing=True,
+        )
+
+    # Second stock strategy, independent of tilt/LLM: buys short sharp dips and
+    # runs its own 5-day-SMA exit. Once daily near the close (signal is defined
+    # on the closing print, so an hourly scan would fire on an unfinished bar).
+    if settings.stocks_trading_enabled and settings.mean_reversion_enabled:
+        sched.add_job(
+            _mean_reversion_job,
+            CronTrigger(
+                day_of_week="mon-fri",
+                hour=int(settings.mr_run_hour),
+                minute=int(settings.mr_run_minute),
+                timezone=settings.market_timezone,
+            ),
+            id="khabari_mean_reversion",
             replace_existing=True,
         )
 

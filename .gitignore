@@ -26,6 +26,9 @@ build/
 n8n/data/
 n8n/.n8n/
 
+# Market-data cache (Yahoo/Stooq dumps)
+python-service/.cache/
+
 # Data / uploads
 data/portfolio.xlsx
 data/uploads/

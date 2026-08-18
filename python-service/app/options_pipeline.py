@@ -14,7 +14,15 @@ from app.db import (
     save_options_recommendation,
     save_prices,
 )
-from app.day_moves import build_day_moves_map, build_runup_map, fetch_live_day_pct
+from app.day_moves import (
+    build_day_moves_map,
+    build_decomposition_map,
+    build_progo_map,
+    build_runup_map,
+    fetch_day_decomposition,
+    fetch_live_day_pct,
+    fetch_progo,
+)
 from app.gates import (
     apply_options_chase_gate,
     apply_options_confidence_gate,
@@ -213,6 +221,35 @@ def run_options_analysis(
         {k: round(v, 2) for k, v in sorted(runups.items())},
     )
 
+    # ProGo gap/intraday split — only needed for names the chase gate could bite,
+    # so skip the extra Yahoo call for anything sitting inside the threshold.
+    decompositions: dict[str, dict[str, float]] = {}
+    progo: dict[str, dict[str, Any]] = {}
+    if settings.options_progo_enabled and settings.options_progo_chase_mode != "off":
+        chase_limit = float(settings.options_max_intraday_chase_pct)
+        movers_only = [
+            t for t, pct in day_moves.items() if abs(float(pct)) >= chase_limit
+        ]
+        decompositions = build_decomposition_map(movers_only)
+        progo = build_progo_map(
+            list(indicators.keys()), int(settings.options_progo_length)
+        )
+        if decompositions:
+            logger.info(
+                "ProGo decomposition (mode=%s): %s",
+                settings.options_progo_chase_mode,
+                {
+                    t: f"day {d['day_pct']:+.2f}% = gap {d['gap_pct']:+.2f}% + "
+                    f"intraday {d['intraday_pct']:+.2f}%"
+                    for t, d in sorted(decompositions.items())
+                },
+            )
+        if progo:
+            logger.info(
+                "ProGo 14d regime: %s",
+                {t: row.get("regime") for t, row in sorted(progo.items())},
+            )
+
     chase_dropped: list[dict[str, Any]] = []
     if settings.options_filter_chase_candidates:
         candidates_flat, chase_dropped = filter_chase_candidates(
@@ -300,7 +337,10 @@ def run_options_analysis(
             "Rank underlyings; take best when score>=60 else HOLD. "
             "NEVER chase large same-day moves (see day_moves / chase_limit_pct): "
             "no calls after a big green day, no puts after a big red day — HOLD or "
-            "pick a non-chase setup instead."
+            "pick a non-chase setup instead. day_decomposition splits each move "
+            "into gap (public/overnight) vs intraday (professional). A gap-driven "
+            "extension is the weakest chase; an all-session grind is participation. "
+            "progo.regime is the 14-day professional-vs-public tilt."
         ),
         "trigger": trigger,
         "news": news_summary,
@@ -313,6 +353,13 @@ def run_options_analysis(
         "chase_limit_pct": float(settings.options_max_intraday_chase_pct),
         "chase_runup_limit_pct": float(settings.options_max_runup_chase_pct),
         "chase_candidates_filtered": len(chase_dropped),
+        # gap_pct = overnight hand-off (public), intraday_pct = session grind
+        # (professional). A move that is nearly all gap is the weakest kind.
+        "day_decomposition": decompositions,
+        "progo": {
+            t: {"pro": r.get("pro"), "public": r.get("public"), "regime": r.get("regime")}
+            for t, r in progo.items()
+        },
     }
     decision = run_options_decision_agent(context)
 
@@ -346,12 +393,63 @@ def run_options_analysis(
                 "Chase pre-check: live day_pct unavailable for %s — fail-closed gate",
                 chosen,
             )
-    final = apply_options_chase_gate(final, day_moves, runups=runups)
+        # The chosen name may have looked flat during the bulk pass and so been
+        # skipped above; resolve its split now that it is the one being judged.
+        if (
+            settings.options_progo_enabled
+            and settings.options_progo_chase_mode != "off"
+            and chosen not in decompositions
+        ):
+            parts = fetch_day_decomposition(chosen)
+            if parts:
+                decompositions[chosen] = parts
+        if (
+            settings.options_progo_enabled
+            and settings.options_progo_chase_mode != "off"
+            and chosen
+            and chosen not in progo
+        ):
+            row = fetch_progo(chosen, int(settings.options_progo_length))
+            if row:
+                progo[chosen] = row
+
+    final = apply_options_chase_gate(
+        final,
+        day_moves,
+        runups=runups,
+        decompositions=decompositions,
+        progo=progo,
+    )
     # Premium moves while Gemini runs — re-quote Yahoo before we notify.
     final = _refresh_live_premium(final)
     # Premium refresh can flip HOLD→still BUY; re-assert chase on the live quote.
     if str(final.get("action") or "").upper() == "BUY_TO_OPEN":
-        final = apply_options_chase_gate(final, day_moves, runups=runups)
+        final = apply_options_chase_gate(
+            final,
+            day_moves,
+            runups=runups,
+            decompositions=decompositions,
+            progo=progo,
+        )
+
+    if final.get("chase_shadow_relax_candidate"):
+        logger.info(
+            "ProGo shadow disagreement: %s %s blocked as chase but move was "
+            "intraday-driven (day %.2f%% = gap %.2f%% + intraday %.2f%%, share %.2f) "
+            "— live mode would have allowed it",
+            final.get("ticker"),
+            (final.get("blocked_contract") or {}).get("right"),
+            float(final.get("day_pct") or 0.0),
+            float(final.get("chase_gap_pct") or 0.0),
+            float(final.get("chase_intraday_pct") or 0.0),
+            float(final.get("chase_gap_share") or 0.0),
+        )
+    elif final.get("chase_relaxed"):
+        logger.info(
+            "ProGo relaxed chase gate (live mode): %s day %.2f%% was intraday-driven",
+            final.get("ticker"),
+            float(final.get("day_pct") or 0.0),
+        )
     if "ranked" in decision:
         # The ranking is persisted and rendered by the confirm UI — neutralize
         # BUY_TO_OPEN bias on chase names so it can't read as a suggestion.
@@ -377,6 +475,9 @@ def run_options_analysis(
             "scan_errors": scan.get("errors"),
             "trigger": trigger,
             "day_moves": day_moves,
+            "day_decomposition": decompositions,
+            "progo": progo,
+            "progo_chase_mode": settings.options_progo_chase_mode,
         },
     )
     from app.notify import _confirm_url

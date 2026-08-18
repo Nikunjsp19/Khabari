@@ -39,6 +39,26 @@ def _confirm_url(recommendation_id: str | None = None, *, tab: str | None = None
     return url
 
 
+STRATEGY_LABELS = {
+    "momentum_tilt": "Momentum Tilt",
+    "mean_reversion": "Connors Swing",
+    "exit_engine": "ATR Exit",
+}
+
+
+def strategy_label(rec: dict[str, Any]) -> str:
+    """Human name of the engine behind a recommendation.
+
+    Several engines now compete for the same cash, so every alert has to say
+    which one is asking — otherwise two BUYs on one balance look like one
+    engine contradicting itself.
+    """
+    key = str(rec.get("strategy") or rec.get("signal_source") or "").strip()
+    if not key:
+        return "AI Analyst"
+    return STRATEGY_LABELS.get(key, key.replace("_", " ").title())
+
+
 def format_recommendation_message(
     rec: dict[str, Any],
     *,
@@ -48,11 +68,12 @@ def format_recommendation_message(
     desk = _confirm_url(recommendation_id)
     reasons = rec.get("reasoning") or []
     sync_line = f"\n\nAfter you trade, confirm in Hisaab:\n{desk}"
+    label = strategy_label(rec)
 
     if markdown:
         bullets = "\n".join(f"• {r}" for r in reasons) or "• (none)"
         return (
-            "🚨 *AI Recommendation*\n\n"
+            f"🚨 *{label}*\n\n"
             f"*{rec.get('action')} {rec.get('ticker')}* – Invest ${rec.get('investment')}\n"
             f"Confidence: {rec.get('confidence')}%\n"
             f"Risk: {rec.get('risk')}\n\n"
@@ -65,7 +86,7 @@ def format_recommendation_message(
 
     bullets = "\n".join(f"• {r}" for r in reasons) or "• (none)"
     return (
-        "AI Recommendation\n\n"
+        f"{label}\n\n"
         f"{rec.get('action')} {rec.get('ticker')} – Invest ${rec.get('investment')}\n"
         f"Confidence: {rec.get('confidence')}%\n"
         f"Risk: {rec.get('risk')}\n\n"
@@ -353,7 +374,10 @@ def notify_recommendation(
         rec, markdown=False, recommendation_id=recommendation_id
     )
     md = format_recommendation_message(rec, markdown=True, recommendation_id=recommendation_id)
-    title = f"{rec.get('action')} {rec.get('ticker')} (${rec.get('investment')})"
+    title = (
+        f"[{strategy_label(rec)}] {rec.get('action')} {rec.get('ticker')} "
+        f"(${rec.get('investment')})"
+    )
 
     if settings.ntfy_topic:
         try:

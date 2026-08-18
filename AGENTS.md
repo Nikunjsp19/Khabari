@@ -78,6 +78,57 @@ test the Python service (Docker is not preinstalled on this VM).
   named the contract and read like a suggestion.
 - `day_moves` / `runups` are passed into **both** LLM passes; the `ranked` list
   is sanitized so chase names cannot carry `bias: BUY_TO_OPEN`.
+- **ProGo** (Larry Williams, used by Rosputnia on stocks/futures): daily
+  professional-vs-public overlay. `accumulation` confirms a long (desks buying
+  the close); `distribution` skips new tilt entries and haircuts the LLM-path
+  quant score. Config: `PROGO_ENABLED`, `TILT_SKIP_PROGO_DISTRIBUTION`.
+  The options chase gate also records a same-session gap/grind split in
+  `shadow` mode — that is *not* her stock strategy, just a related filter.
+
+### Multiple stock strategies, sleeved cash
+- Two independent stock engines run in parallel and each sends its **own**
+ notification. Both use the same `portfolio` document, but **sleeves** cap
+ how much of NAV each may invest: **30% Tilt (`TILT_SLEEVE_PCT`)** and
+ **70% Connors (`MR_SLEEVE_PCT`)**. Tilt equal-weights top-N against its
+ $300 sleeve (~$30/name). Connors sizes 33% of its $700 sleeve per slot
+ (~$231 × 3). Confirm-time `execute_recommendation` rejects a BUY that
+ would breach that engine's sleeve.
+ - **Momentum Tilt** (`app/tilt.py`, `TILT_ENABLED`) — buys strength, monthly
+ rebalance of the top-N by momentum, 200d trend-brake SELLs. Holds months.
+ Leveraged/inverse single-stock ETFs are stripped unless `TILT_ALLOW_LEVERED`.
+ - **Connors Swing** (`app/mean_reversion.py`, `MEAN_REVERSION_ENABLED`) —
+ short-term swing, **not** a day trade. Holds 1–7 sessions. Two setups from
+ *Short Term Trading Strategies That Work*:
+ - Index ETFs (SPY/QQQ/IWM): **Double 7s** — 7-day low in, 7-day high out,
+ above the 200d SMA.
+ - Stocks: **RSI(2)** — above 200d, below 5d, RSI(2) < 10, at least two
+ down closes. Exit 5d reclaim, RSI(2) > 70, or a 7-session time stop.
+ - VIX overlay: skip *new* longs when VIX is stretched below its 10-day MA
+ (complacency). Elevated VIX is a green light.
+ - Universe is liquid large-caps + those three ETFs; 2x products are excluded.
+ Default size is 33% of the **Connors sleeve** per slot × 3 slots. ProGo is off here.
+ Runs **once daily at `MR_RUN_HOUR:MR_RUN_MINUTE`** (15:45 ET).
+- They are intentionally **opposite in style** (trend-following vs mean
+ reversion) so their drawdowns don't line up. Connors' own guidance is that
+ RSI(2) belongs in a multi-strategy book, not used alone — it sits in cash a
+ lot and its edge is win rate, not compounding.
+- **Ownership (`app/strategy_book.py`)**: a ticker is *claimed* by a strategy
+ when one of its recommendations is executed, and released when the position
+ closes. Without this the tilt would rank-exit a name RSI(2) just bought and
+ the ATR engine would stop it out before the 5d-SMA exit fired. So:
+ - tilt ignores foreign-claimed tickers for ranking, entries, and both SELL paths
+ - the ATR exit engine (`app/exits.py`) skips foreign-claimed tickers
+ - RSI(2) only manages what it claimed, and never enters a name already held
+ - claims are reconciled against real positions each run, so manual sells
+ outside the app don't leave a ticker stuck
+- Reads **fail open**: if Mongo is unavailable, "nobody owns anything", which
+ restores single-strategy behaviour rather than freezing trades.
+- Sleeve math lives in `app/strategy_book.py::sleeve_state`. Each engine
+ sizes against its budget; leftover cash in one sleeve is not spent by the other.
+- Every alert is prefixed with the engine name (`[Connors Swing] BUY AAPL ($231)`)
+ and `/desk` shows a Strategy line plus sleeve %. `GET /strategies` lists what's
+ live, each sleeve, and which tickers each engine owns.
+- Endpoints: `GET /mean-reversion/plan` (dry run), `POST /mean-reversion/run`.
 
 ### Stock trading pause
 - `STOCKS_TRADING_ENABLED=false` (default) pauses stock trading. Options keep

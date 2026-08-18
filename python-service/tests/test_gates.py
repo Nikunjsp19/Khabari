@@ -3,6 +3,7 @@
 from app.gates import (
     apply_confidence_gate,
     apply_options_chase_gate,
+    classify_chase_character,
     filter_chase_candidates,
     is_options_chase,
     sanitize_ranked_for_chase,
@@ -10,6 +11,29 @@ from app.gates import (
     should_notify_options,
 )
 from app.news_watch import fingerprint_article
+
+
+def _chase_rec(ticker: str = "AMZN", right: str = "call") -> dict:
+    """A clean BUY_TO_OPEN for chase-gate tests."""
+    return {
+        "ticker": ticker,
+        "action": "BUY_TO_OPEN",
+        "right": right,
+        "strike": 250,
+        "expiry": "2026-09-18",
+        "contracts": 1,
+        "premium": 5.0,
+        "investment": 500,
+        "max_loss": 500,
+        "confidence": 75,
+        "risk": "MEDIUM",
+        "risk_notes": [],
+        "reasoning": ["momentum"],
+    }
+
+
+def _decomp(day: float, gap: float) -> dict[str, float]:
+    return {"day_pct": day, "gap_pct": gap, "intraday_pct": round(day - gap, 3)}
 
 
 def test_confidence_gate_downgrades_weak_buy(monkeypatch):
@@ -376,4 +400,187 @@ def test_sanitize_ranked_neutralizes_chase_bias(monkeypatch):
     assert by_ticker["ORCL"]["bias"] == "HOLD"
     assert by_ticker["ORCL"]["chase_blocked"] is True
     assert by_ticker["AAPL"]["bias"] == "BUY_TO_OPEN"
+    get_settings.cache_clear()
+
+
+# --- ProGo: gap (public) vs intraday (professional) chase character ----------
+
+
+def test_classify_chase_character_gap_vs_intraday(monkeypatch):
+    monkeypatch.setenv("OPTIONS_PROGO_GAP_SHARE", "0.6")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+
+    # +3% day that gapped +2.8% — the public paid up on the open.
+    gap_driven = classify_chase_character(3.0, _decomp(3.0, 2.8))
+    assert gap_driven["character"] == "gap_driven"
+    assert gap_driven["gap_share"] == round(2.8 / 3.0, 3)
+
+    # +3% day that opened flat and ground up all session.
+    intraday = classify_chase_character(3.0, _decomp(3.0, 0.2))
+    assert intraday["character"] == "intraday_driven"
+    assert intraday["intraday_pct"] == 2.8
+
+    # Half and half is neither.
+    assert classify_chase_character(3.0, _decomp(3.0, 1.5))["character"] == "mixed"
+
+    # Sign-agnostic: a dumped name that gapped down reads the same way.
+    assert (
+        classify_chase_character(-3.0, _decomp(-3.0, -2.8))["character"] == "gap_driven"
+    )
+    assert (
+        classify_chase_character(-3.0, _decomp(-3.0, -0.1))["character"]
+        == "intraday_driven"
+    )
+
+    # Gap went the other way — whole move was intraday, share is negative.
+    opened_down = classify_chase_character(3.0, _decomp(3.0, -0.5))
+    assert opened_down["character"] == "intraday_driven"
+    assert opened_down["gap_share"] < 0
+    get_settings.cache_clear()
+
+
+def test_classify_chase_character_unknown_without_data(monkeypatch):
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    assert classify_chase_character(3.0, None)["character"] == "unknown"
+    assert classify_chase_character(None, _decomp(3.0, 1.0))["character"] == "unknown"
+    # Near-flat day makes the ratio meaningless rather than "intraday".
+    assert classify_chase_character(0.02, _decomp(0.02, 0.01))["character"] == "unknown"
+    get_settings.cache_clear()
+
+
+def test_progo_shadow_mode_blocks_but_records_disagreement(monkeypatch):
+    """Shadow mode must not change any action — only mark what live would do."""
+    monkeypatch.setenv("OPTIONS_MAX_INTRADAY_CHASE_PCT", "2.5")
+    monkeypatch.setenv("OPTIONS_PROGO_CHASE_MODE", "shadow")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    out = apply_options_chase_gate(
+        _chase_rec(), {"AMZN": 3.0}, decompositions={"AMZN": _decomp(3.0, 0.2)}
+    )
+    assert out["action"] == "HOLD"
+    assert out["chase_blocked"] is True
+    assert out["chase_shadow_relax_candidate"] is True
+    assert out["chase_character"] == "intraday_driven"
+    assert any("ProGo shadow" in n for n in out["risk_notes"])
+    get_settings.cache_clear()
+
+
+def test_progo_live_mode_allows_intraday_driven_move(monkeypatch):
+    monkeypatch.setenv("OPTIONS_MAX_INTRADAY_CHASE_PCT", "2.5")
+    monkeypatch.setenv("OPTIONS_PROGO_CHASE_MODE", "live")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    out = apply_options_chase_gate(
+        _chase_rec(), {"AMZN": 3.0}, decompositions={"AMZN": _decomp(3.0, 0.2)}
+    )
+    assert out["action"] == "BUY_TO_OPEN"
+    assert out["chase_blocked"] is False
+    assert out["chase_relaxed"] is True
+    assert out["right"] == "call"  # contract survives, not stripped
+    assert any("Chase allowed" in n for n in out["risk_notes"])
+    get_settings.cache_clear()
+
+
+def test_progo_live_mode_still_blocks_gap_driven_move(monkeypatch):
+    monkeypatch.setenv("OPTIONS_MAX_INTRADAY_CHASE_PCT", "2.5")
+    monkeypatch.setenv("OPTIONS_PROGO_CHASE_MODE", "live")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    out = apply_options_chase_gate(
+        _chase_rec(), {"AMZN": 3.0}, decompositions={"AMZN": _decomp(3.0, 2.8)}
+    )
+    assert out["action"] == "HOLD"
+    assert out["chase_blocked"] is True
+    assert out["chase_character"] == "gap_driven"
+    assert any("opening gap" in n for n in out["risk_notes"])
+    get_settings.cache_clear()
+
+
+def test_progo_live_mode_respects_absolute_ceiling(monkeypatch):
+    """However healthy the shape, a +9% day is still an extension."""
+    monkeypatch.setenv("OPTIONS_MAX_INTRADAY_CHASE_PCT", "2.5")
+    monkeypatch.setenv("OPTIONS_PROGO_CHASE_MODE", "live")
+    monkeypatch.setenv("OPTIONS_PROGO_RELAX_MAX_DAY_PCT", "5.0")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    out = apply_options_chase_gate(
+        _chase_rec(), {"AMZN": 9.0}, decompositions={"AMZN": _decomp(9.0, 0.3)}
+    )
+    assert out["action"] == "HOLD"
+    assert out["chase_blocked"] is True
+    get_settings.cache_clear()
+
+
+def test_progo_live_mode_still_blocks_multiday_runup(monkeypatch):
+    """Flat-shaped today but +11% on the week is an extension regardless."""
+    monkeypatch.setenv("OPTIONS_MAX_INTRADAY_CHASE_PCT", "2.5")
+    monkeypatch.setenv("OPTIONS_MAX_RUNUP_CHASE_PCT", "8.0")
+    monkeypatch.setenv("OPTIONS_PROGO_CHASE_MODE", "live")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    out = apply_options_chase_gate(
+        _chase_rec(),
+        {"AMZN": 3.0},
+        runups={"AMZN": 11.0},
+        decompositions={"AMZN": _decomp(3.0, 0.2)},
+    )
+    assert out["action"] == "HOLD"
+    assert out["chase_blocked"] is True
+    get_settings.cache_clear()
+
+
+def test_progo_off_mode_leaves_gate_untouched(monkeypatch):
+    monkeypatch.setenv("OPTIONS_MAX_INTRADAY_CHASE_PCT", "2.5")
+    monkeypatch.setenv("OPTIONS_PROGO_CHASE_MODE", "off")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    out = apply_options_chase_gate(
+        _chase_rec(), {"AMZN": 3.0}, decompositions={"AMZN": _decomp(3.0, 0.2)}
+    )
+    assert out["action"] == "HOLD"
+    assert out["chase_blocked"] is True
+    assert "chase_character" not in out
+    get_settings.cache_clear()
+
+
+def test_progo_attaches_14d_regime_on_chase(monkeypatch):
+    monkeypatch.setenv("OPTIONS_MAX_INTRADAY_CHASE_PCT", "2.5")
+    monkeypatch.setenv("OPTIONS_PROGO_CHASE_MODE", "shadow")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    out = apply_options_chase_gate(
+        _chase_rec(),
+        {"AMZN": 3.0},
+        decompositions={"AMZN": _decomp(3.0, 2.8)},
+        progo={"AMZN": {"regime": "distribution", "pro": -0.2, "public": 0.8}},
+    )
+    assert out["progo_regime"] == "distribution"
+    assert out["chase_character"] == "gap_driven"
+    get_settings.cache_clear()
+
+
+def test_progo_does_not_affect_non_chase_trades(monkeypatch):
+    """A small move was never a chase; ProGo must not invent a block."""
+    monkeypatch.setenv("OPTIONS_MAX_INTRADAY_CHASE_PCT", "2.5")
+    monkeypatch.setenv("OPTIONS_PROGO_CHASE_MODE", "live")
+    from app.config import get_settings
+
+    get_settings.cache_clear()
+    out = apply_options_chase_gate(
+        _chase_rec(), {"AMZN": 1.0}, decompositions={"AMZN": _decomp(1.0, 0.95)}
+    )
+    assert out["action"] == "BUY_TO_OPEN"
+    assert out["chase_blocked"] is False
+    assert out["chase_character"] == "gap_driven"  # recorded, not acted on
     get_settings.cache_clear()

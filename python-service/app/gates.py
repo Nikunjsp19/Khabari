@@ -135,6 +135,65 @@ def is_options_chase(
     return False
 
 
+def classify_chase_character(
+    day_pct: float | None,
+    decomposition: dict[str, float] | None,
+    *,
+    gap_share: float | None = None,
+) -> dict[str, Any]:
+    """Judge whether a big move was handed over on the gap or ground out intraday.
+
+    A +3% day is not one thing. If +2.8% of it was the opening gap, the public
+    paid up on news and desks did nothing all session — the textbook extension
+    the chase gate exists to refuse. If the name opened flat and climbed for six
+    hours, that is participation, and blocking it is a false positive.
+
+    ``share`` is the fraction of the day's move contributed by the gap. It is
+    sign-agnostic (a -3% day that gapped -2.8% scores the same as its mirror),
+    so it reads the same for calls after green days and puts after red ones.
+    Shares above 1 mean the gap overshot and the session gave some back;
+    negative shares mean the gap went the *other* way and the whole move was
+    intraday — the purest participation case.
+
+    Returns ``character`` of gap_driven / intraday_driven / mixed / unknown.
+    """
+    settings = get_settings()
+    threshold = float(
+        gap_share if gap_share is not None else settings.options_progo_gap_share
+    )
+    out: dict[str, Any] = {
+        "character": "unknown",
+        "gap_pct": None,
+        "intraday_pct": None,
+        "gap_share": None,
+    }
+    if not decomposition or day_pct is None:
+        return out
+
+    gap = decomposition.get("gap_pct")
+    intraday = decomposition.get("intraday_pct")
+    if gap is None or intraday is None:
+        return out
+
+    out["gap_pct"] = round(float(gap), 3)
+    out["intraday_pct"] = round(float(intraday), 3)
+
+    move = float(day_pct)
+    # Near-flat days make the ratio explode; there is no meaningful split.
+    if abs(move) < 0.1:
+        return out
+
+    share = float(gap) / move
+    out["gap_share"] = round(share, 3)
+    if share >= threshold:
+        out["character"] = "gap_driven"
+    elif share <= 1.0 - threshold:
+        out["character"] = "intraday_driven"
+    else:
+        out["character"] = "mixed"
+    return out
+
+
 def filter_chase_candidates(
     candidates: list[dict[str, Any]],
     day_moves: dict[str, float] | None = None,
@@ -247,6 +306,8 @@ def apply_options_chase_gate(
     *,
     max_chase_pct: float | None = None,
     runups: dict[str, float] | None = None,
+    decompositions: dict[str, dict[str, float]] | None = None,
+    progo: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Hard-block BUY_TO_OPEN that chase an already-large move.
@@ -254,6 +315,12 @@ def apply_options_chase_gate(
     Buying calls after a big green day (or puts after a dump) is a classic FOMO
     bet — premium already prices much of the move. Same for a multi-session
     run-up. Convert to HOLD so we never ping extensions as actionable trades.
+
+    When ``decompositions`` are supplied, the ProGo gap/intraday split is
+    recorded on the result. In ``shadow`` mode (default) it changes nothing and
+    only marks where ``live`` mode *would* have let the trade through; in
+    ``live`` mode an intraday-driven move under
+    ``options_progo_relax_max_day_pct`` clears the gate.
 
     Fail-closed: unknown day %, unrecognized right, or missing ticker all block.
     """
@@ -269,6 +336,7 @@ def apply_options_chase_gate(
     )
     day_moves = day_moves or {}
     runups = runups or {}
+    decompositions = decompositions or {}
 
     rec["chase_warned"] = False
     rec["chase_blocked"] = False
@@ -306,19 +374,66 @@ def apply_options_chase_gate(
             rec, action=action, notes=notes, reasoning=reasoning, warn=warn
         )
 
+    mode = str(settings.options_progo_chase_mode or "shadow").strip().lower()
+    character: dict[str, Any] = {}
+    if settings.options_progo_enabled and mode != "off":
+        character = classify_chase_character(day_pct, decompositions.get(ticker))
+        rec["chase_character"] = character.get("character")
+        rec["chase_gap_pct"] = character.get("gap_pct")
+        rec["chase_intraday_pct"] = character.get("intraday_pct")
+        rec["chase_gap_share"] = character.get("gap_share")
+        if progo:
+            rec["progo_regime"] = (progo.get(ticker) or {}).get("regime")
+
     if not is_options_chase(
         side, day_pct, max_chase_pct=threshold, runup_pct=runup_pct
     ):
         rec["risk_notes"] = notes
         return rec
 
+    # The gate has decided this is a chase. ProGo gets one chance to argue that
+    # the move was participation rather than a gap hand-off.
+    relax_ok = (
+        character.get("character") == "intraday_driven"
+        and abs(float(day_pct)) <= float(settings.options_progo_relax_max_day_pct)
+        # A multi-session run-up is an extension regardless of today's shape.
+        and not is_options_chase(side, None, runup_pct=runup_pct)
+    )
+    if relax_ok:
+        detail = (
+            f"{ticker} {day_pct:+.2f}% today but only "
+            f"{character['gap_pct']:+.2f}% of it gapped "
+            f"({character['intraday_pct']:+.2f}% intraday, "
+            f"gap share {character['gap_share']:.2f}) — ProGo reads this as "
+            f"session participation, not a gap hand-off"
+        )
+        if mode == "live":
+            note = f"Chase allowed: {detail}."
+            if note not in notes:
+                notes.append(note)
+            rec["chase_relaxed"] = True
+            rec["risk_notes"] = notes
+            return rec
+        # Shadow mode: block as usual, but mark the disagreement so the two
+        # policies can be compared on real runs before flipping the switch.
+        rec["chase_shadow_relax_candidate"] = True
+        notes.append(f"ProGo shadow: live mode would have allowed this — {detail}.")
+
     runup_note = (
         f" and {runup_pct:+.2f}% over recent sessions" if runup_pct is not None else ""
     )
+    character_note = ""
+    if character.get("character") == "gap_driven":
+        character_note = (
+            f" ProGo: {character['gap_pct']:+.2f}% of the move was the opening gap "
+            f"(gap share {character['gap_share']:.2f}) — public paid up on the "
+            f"open, desks did not add intraday."
+        )
     warn = (
         f"Chase blocked: {ticker} already {day_pct:+.2f}% today{runup_note} — that move "
         f"is significant; buying a {side} now is chasing an extension "
         f"(premium already prices much of it). Converted BUY_TO_OPEN → HOLD."
+        f"{character_note}"
     )
     return _block_chase_buy(
         rec, action=action, notes=notes, reasoning=reasoning, warn=warn

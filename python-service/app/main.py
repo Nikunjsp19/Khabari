@@ -359,6 +359,103 @@ def tilt_rebalance(force: bool = True, send: bool = True) -> dict[str, Any]:
     return serialize_mongo(run_tilt_rebalance(force=force, send_notification=send))
 
 
+@app.get("/mean-reversion/plan")
+def mean_reversion_plan() -> dict[str, Any]:
+    """Preview today's RSI(2) dip setups + exits — no writes, no spend."""
+    from app.mean_reversion import compute_mean_reversion_plan
+
+    return serialize_mongo(compute_mean_reversion_plan())
+
+
+@app.post("/mean-reversion/run")
+def mean_reversion_run(send: bool = True) -> dict[str, Any]:
+    """Run the RSI(2) mean-reversion engine now; emits recs to confirm in Hisaab."""
+    settings = get_settings()
+    if not settings.stocks_trading_enabled:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "error": "stocks_trading_paused",
+                "message": "Stock trading is paused (STOCKS_TRADING_ENABLED=false). Set true to re-enable.",
+            },
+        )
+    from app.mean_reversion import run_mean_reversion
+
+    return serialize_mongo(run_mean_reversion(send_notification=send))
+
+
+@app.get("/strategies")
+def strategies() -> dict[str, Any]:
+    """Which engines are live, their sleeves, and which tickers each one owns."""
+    from app.db import get_latest_portfolio
+    from app.strategy_book import owned_by, owned_holdings, sleeve_state
+
+    settings = get_settings()
+    cash = 0.0
+    nav = 0.0
+    positions: dict[str, Any] = {}
+    try:
+        book = get_latest_portfolio()
+        cash = float(book.get("cash") or 0.0)
+        positions = dict(book.get("positions") or {})
+        nav = cash + sum(
+            float((p or {}).get("shares") or 0.0) * float((p or {}).get("avg_cost") or 0.0)
+            for p in positions.values()
+        )
+    except Exception:  # noqa: BLE001
+        nav = float(settings.initial_cash)
+
+    tilt_sleeve = sleeve_state(
+        "momentum_tilt",
+        cash=cash,
+        total_value=nav or cash,
+        positions=positions,
+        owned=owned_holdings("momentum_tilt", positions),
+    )
+    mr_sleeve = sleeve_state(
+        "mean_reversion",
+        cash=cash,
+        total_value=nav or cash,
+        positions=positions,
+        owned=owned_holdings("mean_reversion", positions),
+    )
+    return serialize_mongo(
+        {
+            "shared_cash_pool": True,
+            "sleeves": True,
+            "stocks_trading_enabled": settings.stocks_trading_enabled,
+            "options_scheduler_enabled": settings.options_scheduler_enabled,
+            "cash": round(cash, 2),
+            "nav": round(nav or cash, 2),
+            "strategies": [
+                {
+                    "id": "momentum_tilt",
+                    "label": "Momentum Tilt",
+                    "enabled": settings.stocks_trading_enabled and settings.tilt_enabled,
+                    "style": "trend-following, monthly rebalance",
+                    "sleeve_pct": tilt_sleeve["pct"],
+                    "sleeve_budget": tilt_sleeve["budget"],
+                    "sleeve_invested": tilt_sleeve["invested"],
+                    "sleeve_room": tilt_sleeve["room"],
+                    "owns": sorted(owned_by("momentum_tilt")),
+                },
+                {
+                    "id": "mean_reversion",
+                    "label": "Connors Swing",
+                    "enabled": settings.stocks_trading_enabled
+                    and settings.mean_reversion_enabled,
+                    "style": "swing mean reversion, holds 1–7 days (RSI(2) + Double 7s)",
+                    "sleeve_pct": mr_sleeve["pct"],
+                    "sleeve_budget": mr_sleeve["budget"],
+                    "sleeve_invested": mr_sleeve["invested"],
+                    "sleeve_room": mr_sleeve["room"],
+                    "owns": sorted(owned_by("mean_reversion")),
+                },
+            ],
+        }
+    )
+
+
 @app.get("/exits/check")
 def exits_check() -> dict[str, Any]:
     """Preview the deterministic exit engine against open positions (no alerts sent)."""

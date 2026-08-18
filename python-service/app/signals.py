@@ -22,6 +22,7 @@ import time
 from typing import Any
 
 from app.config import get_settings
+from app.progo import progo_score_delta
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +250,16 @@ def score_ticker(
             score -= 4
             reasons.append(f"Volume {rel_volume:.1f}× avg — thin/unconfirmed")
 
+    # --- ProGo confirmation (Williams: professional close vs public gap) -----
+    settings = get_settings()
+    progo = daily.get("progo") if isinstance(daily.get("progo"), dict) else None
+    regime = (progo or {}).get("regime") or daily.get("progo_regime")
+    if settings.progo_enabled:
+        delta, note = progo_score_delta(regime, float(settings.progo_score_pts))
+        score += delta
+        if note:
+            reasons.append(note)
+
     # --- Cross-sectional relative strength (Jegadeesh & Titman) --------------
     xmom = xmom or {}
     mom_pct = _num(xmom.get("percentile"))
@@ -264,7 +275,6 @@ def score_ticker(
             reasons.append(f"Bottom-{int(mom_pct) or 1}% relative strength (laggard)")
 
     score = round(_clamp(score), 1)
-    settings = get_settings()
     buy_bar = float(settings.signal_buy_threshold)
 
     if not trend_ok:
@@ -290,6 +300,9 @@ def score_ticker(
         "daily_adx": d_adx,
         "momentum_pct": mom_pct,
         "momentum_return": _num(xmom.get("momentum")),
+        "progo_regime": regime,
+        "progo_pro": _num((progo or {}).get("pro")),
+        "progo_public": _num((progo or {}).get("public")),
     }
 
 

@@ -9,6 +9,8 @@ import pandas as pd
 import pandas_ta as ta
 import yfinance as yf
 
+from app.progo import progo_from_bars
+
 logger = logging.getLogger(__name__)
 
 
@@ -183,7 +185,35 @@ def compute_indicators_batch(
     return {"indicators": results, "errors": errors}
 
 
-def _daily_indicator_row(sub: "pd.DataFrame") -> dict[str, Any] | None:
+def compute_progo(sub: "pd.DataFrame", length: int = 14) -> dict[str, Any] | None:
+    """Larry Williams' ProGo — separate professional flow from public flow.
+
+    Two accumulation/distribution lines built from daily bars:
+
+    * ``pro``    — mean of ``Close - Open`` over *length* sessions. Money that
+      moved while the session was open, i.e. what desks did intraday.
+    * ``public`` — mean of ``Open - PrevClose`` over *length* sessions. Money
+      that moved between sessions, i.e. gap-chasing on overnight news.
+
+    Williams plots raw points; both lines here are percentages of the prior
+    close so tickers at different price levels stay comparable (Khabari ranks
+    cross-sectionally, where a $3 NVDA move and a $3 SPY move are not alike).
+
+    Returns None when there are not enough bars to fill the window.
+    """
+    if sub is None or sub.empty:
+        return None
+    if "Open" not in sub.columns or "Close" not in sub.columns:
+        return None
+    frame = sub[["Open", "Close"]].dropna()
+    return progo_from_bars(
+        frame["Open"].tolist(), frame["Close"].tolist(), length=length
+    )
+
+
+def _daily_indicator_row(
+    sub: "pd.DataFrame", progo_length: int | None = 14
+) -> dict[str, Any] | None:
     """Compute a daily-timeframe context row from one ticker's OHLCV frame."""
     if sub is None or sub.empty:
         return None
@@ -201,8 +231,12 @@ def _daily_indicator_row(sub: "pd.DataFrame") -> dict[str, Any] | None:
         s = series.dropna()
         return float(s.tail(length).mean()) if len(s) >= max(20, length // 2) else None
 
+    sma5 = float(close.tail(5).mean()) if n >= 5 else None
     sma50 = _tail_mean(close, 50)
     sma200 = _tail_mean(close, 200)
+    # RSI(2) is the Connors mean-reversion trigger — deliberately hair-trigger,
+    # unlike the RSI(14) used for the momentum read below.
+    rsi2 = _latest_scalar(ta.rsi(close, length=2)) if n >= 5 else None
     ema50 = _latest_scalar(ta.ema(close, length=50)) if n >= 50 else None
     ema200 = _latest_scalar(ta.ema(close, length=200)) if n >= 200 else None
     rsi = _latest_scalar(ta.rsi(close, length=14)) if n >= 15 else None
@@ -251,8 +285,25 @@ def _daily_indicator_row(sub: "pd.DataFrame") -> dict[str, Any] | None:
         if start > 0:
             mom_12_1 = round((end / start - 1) * 100, 2)
 
+    progo = compute_progo(sub, progo_length) if progo_length else None
+
+    # Connors swing extras: consecutive down closes + 7-day extremes (Double 7s).
+    consecutive_down = 0
+    if n >= 2:
+        for i in range(n - 1, 0, -1):
+            a, b = float(close.iloc[i]), float(close.iloc[i - 1])
+            if a < b:
+                consecutive_down += 1
+            else:
+                break
+    window = close.tail(7)
+    at_7d_low = bool(price is not None and n >= 7 and price <= float(window.min()) + 1e-9)
+    at_7d_high = bool(price is not None and n >= 7 and price >= float(window.max()) - 1e-9)
+
     return {
         "price": _round(price),
+        "sma5": _round(sma5),
+        "rsi2": _round(rsi2, 2),
         "sma50": _round(sma50),
         "sma200": _round(sma200),
         "ema50": _round(ema50),
@@ -270,11 +321,18 @@ def _daily_indicator_row(sub: "pd.DataFrame") -> dict[str, Any] | None:
         "ret_6m": _ret(126),
         "ret_12m": _ret(252),
         "mom_12_1": mom_12_1,
+        "consecutive_down_days": consecutive_down,
+        "at_7d_low": at_7d_low,
+        "at_7d_high": at_7d_high,
+        "progo": progo,
+        "progo_regime": (progo or {}).get("regime"),
         "bars": n,
     }
 
 
-def compute_daily_context_batch(symbols: list[str], period: str = "1y") -> dict[str, Any]:
+def compute_daily_context_batch(
+    symbols: list[str], period: str = "1y", progo_length: int | None = 14
+) -> dict[str, Any]:
     """Daily-timeframe context (SMA200/EMA/ADX/ATR/relative-volume) for the trend filter.
 
     One batched yfinance download for the whole watchlist keeps this cheap. Daily
@@ -310,7 +368,7 @@ def compute_daily_context_batch(symbols: list[str], period: str = "1y") -> dict[
                 sub = df[sym]
             else:
                 sub = df  # single-ticker download → flat columns
-            row = _daily_indicator_row(sub)
+            row = _daily_indicator_row(sub, progo_length)
             if row:
                 out[sym] = row
         except Exception:  # noqa: BLE001

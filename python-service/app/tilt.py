@@ -23,7 +23,6 @@ from typing import Any
 
 from app.config import get_settings
 from app.db import (
-    get_active_watchlist,
     get_db,
     get_latest_portfolio,
     save_recommendation,
@@ -32,6 +31,7 @@ from app.gates import should_notify
 from app.indicators import compute_daily_context_batch
 from app.market_hours import now_market
 from app.notify import notify_recommendation
+from app.strategy_book import cap_buys_to_sleeve, claimed_by_others, owned_holdings, sleeve_state
 from app.trades import portfolio_with_marks
 
 logger = logging.getLogger(__name__)
@@ -48,14 +48,18 @@ def _num(v: Any) -> float | None:
 
 
 def tilt_universe() -> list[str]:
-    """Universe to rank. Uses TILT_UNIVERSE if set, else the active watchlist."""
+    """Universe to rank. Uses TILT_UNIVERSE if set, else DEFAULT_TILT_UNIVERSE."""
+    from app.universe import DEFAULT_TILT_UNIVERSE, without_levered
+
     settings = get_settings()
     raw = (settings.tilt_universe or "").strip()
     if raw:
         syms = [s.strip().upper() for s in raw.split(",") if s.strip()]
     else:
-        syms = [s.upper() for s in get_active_watchlist()]
-    return list(dict.fromkeys(syms))
+        syms = list(DEFAULT_TILT_UNIVERSE)
+    if settings.tilt_allow_levered:
+        return list(dict.fromkeys(syms))
+    return without_levered(syms)
 
 
 def _momentum(d: dict[str, Any]) -> float | None:
@@ -72,6 +76,7 @@ def rank_universe(
     *,
     require_uptrend: bool,
     require_positive_momentum: bool,
+    skip_progo_distribution: bool = False,
 ) -> list[dict[str, Any]]:
     """Rank tickers by momentum after the absolute-momentum (trend) filter."""
     ranked: list[dict[str, Any]] = []
@@ -86,6 +91,12 @@ def rank_universe(
             continue
         if require_positive_momentum and mom <= 0:
             continue
+        progo = d.get("progo") if isinstance(d.get("progo"), dict) else None
+        regime = (progo or {}).get("regime") or d.get("progo_regime")
+        # Rosputnia overlay: don't *enter* names desks are distributing into.
+        # Missing ProGo fails open so a young ticker still ranks.
+        if skip_progo_distribution and regime == "distribution":
+            continue
         ranked.append(
             {
                 "ticker": sym,
@@ -93,6 +104,9 @@ def rank_universe(
                 "price": _num(d.get("price")),
                 "above_sma200": above,
                 "dist_sma200_pct": _num(d.get("dist_sma200_pct")),
+                "progo_regime": regime,
+                "progo_pro": _num((progo or {}).get("pro")),
+                "progo_public": _num((progo or {}).get("public")),
             }
         )
     ranked.sort(key=lambda r: r["momentum"], reverse=True)
@@ -120,18 +134,36 @@ def compute_tilt_plan(
     universe = universe or tilt_universe()
     marked = portfolio_marked or portfolio_with_marks()
     cash = float(marked.get("cash") or 0.0)
-    positions = marked.get("positions") or {}
+    all_positions = marked.get("positions") or {}
     total_value = float(marked.get("total_value") or (cash))
+
+    # Another strategy's open trades are not ours to rebalance or exit.
+    foreign = claimed_by_others("momentum_tilt")
+    positions = {t: p for t, p in all_positions.items() if t.upper() not in foreign}
+    sleeve = sleeve_state(
+        "momentum_tilt",
+        cash=cash,
+        total_value=total_value,
+        positions=all_positions,
+        owned=owned_holdings("momentum_tilt", all_positions),
+    )
+    sleeve_nav = float(sleeve["budget"])
 
     daily = compute_daily_context_batch(universe, period="2y")
     ranked = rank_universe(
         daily,
         require_uptrend=settings.tilt_require_uptrend,
         require_positive_momentum=settings.tilt_require_positive_momentum,
+        skip_progo_distribution=bool(
+            settings.progo_enabled and settings.tilt_skip_progo_distribution
+        ),
     )
+    # Don't enter a name another strategy is already long — one pool of money,
+    # but only one owner per ticker.
+    ranked = [r for r in ranked if r["ticker"] not in foreign]
     selected = ranked[:top_n]
     selected_syms = {r["ticker"] for r in selected}
-    target_each = total_value / top_n if top_n > 0 else 0.0
+    target_each = sleeve_nav / top_n if top_n > 0 else 0.0
 
     def held_value(sym: str) -> float:
         pos = positions.get(sym) or {}
@@ -175,7 +207,14 @@ def compute_tilt_plan(
 
     if not rebalance:
         return _finalize_plan(
-            trades, selected, ranked, cash, total_value, target_each, rebalance=False
+            trades,
+            selected,
+            ranked,
+            cash,
+            total_value,
+            target_each,
+            rebalance=False,
+            sleeve=sleeve,
         )
 
     # --- Full monthly rebalance ---------------------------------------------
@@ -219,6 +258,13 @@ def compute_tilt_plan(
                             f"{r['momentum']}%)",
                             f"Above its 200-day average — target equal weight "
                             f"(~${target_each:,.0f})",
+                            *(
+                                [
+                                    "ProGo accumulation — professionals buying the close"
+                                ]
+                                if r.get("progo_regime") == "accumulation"
+                                else []
+                            ),
                         ],
                     }
                 )
@@ -262,8 +308,16 @@ def compute_tilt_plan(
                     }
                 )
 
+    capped = cap_buys_to_sleeve(trades, cash=cash, sleeve=sleeve, min_trade=min_trade)
     return _finalize_plan(
-        trades, selected, ranked, cash, total_value, target_each, rebalance=True
+        capped,
+        selected,
+        ranked,
+        cash,
+        total_value,
+        target_each,
+        rebalance=True,
+        sleeve=sleeve,
     )
 
 
@@ -276,6 +330,7 @@ def _finalize_plan(
     target_each: float,
     *,
     rebalance: bool,
+    sleeve: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "rebalance": rebalance,
@@ -286,6 +341,7 @@ def _finalize_plan(
         "total_value": round(total_value, 2),
         "target_each": round(target_each, 2),
         "top_n": get_settings().tilt_top_n,
+        "sleeve": sleeve or {},
     }
 
 
@@ -396,7 +452,7 @@ def run_tilt_rebalance(
         return {"ok": False, "error": f"portfolio unavailable: {exc}"}
 
     plan = compute_tilt_plan(portfolio_marked=marked, rebalance=is_rebalance)
-    cash = float(plan.get("cash") or 0.0)
+    cash = float((plan.get("sleeve") or {}).get("available_cash") or plan.get("cash") or 0.0)
 
     # De-dupe trend-brake sells that are already pending
     emitted: list[dict[str, Any]] = []
@@ -420,6 +476,7 @@ def run_tilt_rebalance(
                 "tilt_kind": trade.get("kind"),
                 "tilt_target": plan.get("target"),
                 "momentum": trade.get("momentum"),
+                "sleeve": plan.get("sleeve"),
             },
         )
         rec["recommendation_id"] = rec_id
@@ -467,4 +524,5 @@ def run_tilt_rebalance(
         "total_value": plan.get("total_value"),
         "cash": plan.get("cash"),
         "top_n": plan.get("top_n"),
+        "sleeve": plan.get("sleeve"),
     }

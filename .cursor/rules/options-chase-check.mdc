@@ -1,0 +1,15 @@
+---
+description: Block options BUY_TO_OPEN that chase same-day extension
+alwaysApply: true
+---
+
+# Options chase gate (same-day move)
+
+A ~3% day in names like AMZN/GOOGL is **significant**. Buying a call after that is usually **too optimistic** — premium already prices much of the move.
+
+When reviewing a Khabari **BUY_TO_OPEN**:
+
+1. Check live **day % vs prior close**.
+2. If a **call** is up ~**≥2.5%** today (or a **put** down ~**≥2.5%**), **do not buy** — you need *further* continuation from here, not a free ride on today's candle.
+3. Pipeline: `apply_options_chase_gate` **converts to HOLD** (no actionable BUY ping). LLM gets `chase_blocked` list to pick another name or HOLD.
+4. Call out **moneyness + DTE** when explaining why (short-dated OTM is especially chase-y after a big candle).

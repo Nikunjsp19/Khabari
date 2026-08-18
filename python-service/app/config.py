@@ -91,19 +91,43 @@ class Settings(BaseSettings):
     tilt_top_n: int = 10                    # equal-weight slots
     tilt_require_uptrend: bool = True       # only hold names above their 200d SMA
     tilt_require_positive_momentum: bool = True  # and with positive 12-1 momentum
+    # ProGo (Larry Williams / Rosputnia): stock confirmation overlay.
+    # Skip new tilt entries when desks are distributing into overnight gaps.
+    tilt_skip_progo_distribution: bool = True
+    # Points added/subtracted on the LLM-path quant score (0-100).
+    progo_enabled: bool = True
+    progo_length: int = 14
+    progo_score_pts: float = 8.0
     tilt_rebalance_band_pct: float = 0.25   # only trim/add a hold when it drifts > this
     tilt_min_trade_usd: float = 20.0        # skip dust trades below this
     # Ranking universe (comma-separated). Empty → use the active watchlist.
-    # Includes 2x bull / inverse single-stock ETFs (TSLL, METU, NVDL, …).
-    tilt_universe: str = (
-        "AAPL,MSFT,GOOGL,AMZN,META,NVDA,AVGO,ORCL,ADBE,CRM,AMD,QCOM",
-        "TXN,INTC,MU,COST,WMT,HD,MCD,NKE,SBUX,PG,KO,PEP",
-        "JPM,BAC,V,MA,GS,UNH,JNJ,LLY,ABBV,MRK,CAT,GE",
-        "XOM,CVX,NFLX,DIS,TSLA,LIN,HON,TSLL,METU,NVDU,NVDL,AAPU",
-        "AMZU,MSFU,GGLL,AMUU,AMDL,AVL,NFXL,ORCU,PLTU,HODU,CONX,CONL",
-        "MSTU,QQQU,FNGG,TSLS,TSDD,METD,NVDD,NVD,AAPD,AMZD,MSFD,GGLS",
-        "AMDD,AVS,NFXS,ORCS,PLTD"
-    )
+    # Liquid large-caps only — 2x/inverse products are stripped at ranking time
+    # unless TILT_ALLOW_LEVERED=true (they inflated last year's drawdown).
+    tilt_allow_levered: bool = False
+    # Share of NAV this engine may invest. Connors gets the rest (see mr_sleeve_pct).
+    # 30/70 was the split that kept Connors funded without starving Tilt in replay.
+    tilt_sleeve_pct: float = 30.0
+    tilt_universe: str = ""  # empty → DEFAULT_TILT_UNIVERSE in app/universe.py
+
+    # --- Connors short-term swing (second stock strategy) ---
+    # Daily-bar mean reversion, hold 1–7 sessions — not a day trade.
+    # Index ETFs use Double 7s; individual names use RSI(2) + consecutive
+    # down-days. Same cash pool as the tilt; strategy_book keeps them apart
+    # and sleeves cap how much of NAV each engine may invest.
+    mean_reversion_enabled: bool = True
+    mr_rsi_entry: float = 10.0          # RSI(2) below this = oversold trigger
+    mr_rsi_exit: float = 70.0           # Connors' RSI(2) bounce-complete exit
+    mr_min_down_days: int = 2           # Connors: edge appears at 2+ down closes
+    mr_max_hold_days: int = 7           # time stop — the 1–7 day swing window
+    mr_max_positions: int = 3           # concurrent dip trades
+    mr_max_position_pct: float = 33.0   # % of this engine's sleeve per trade
+    mr_sleeve_pct: float = 70.0         # share of NAV reserved for Connors Swing
+    mr_min_trade_usd: float = 20.0
+    mr_require_progo: bool = False      # off: it skipped most valid dips last year
+    mr_vix_complacency_pct: float = -5.0  # skip new longs when VIX is this far below 10d MA
+    mr_run_hour: int = 15               # 15:45 ET — near the close, still tradable
+    mr_run_minute: int = 45
+    mr_universe: str = ""               # empty → DEFAULT_SWING_UNIVERSE (no 2x ETFs)
 
     # --- Deterministic exit engine (ATR trailing / initial / time stops) ---
     # Trend-following exits set to DEFENSIBLE STANDARDS, not backtest-optimized
@@ -187,6 +211,20 @@ class Settings(BaseSettings):
     # Chase-blocked results are HOLD with no trade — stay silent instead of
     # pinging an "ORCL CALL" heartbeat every hour (that reads like a suggestion).
     options_notify_chase_blocked: bool = False
+    # ProGo (Larry Williams): split each session into professional flow
+    # (open→close, intraday accumulation) vs public flow (prev close→open, the
+    # overnight gap). Lets the chase gate tell a retail gap-up apart from a
+    # session-long institutional grind instead of treating every +3% day alike.
+    options_progo_enabled: bool = True
+    options_progo_length: int = 14
+    # "shadow" records the verdict without changing any action (compare first),
+    # "live" lets an accumulation-character move clear the chase gate,
+    # "off" skips the computation entirely.
+    options_progo_chase_mode: str = "shadow"
+    # Gap share of the day's move at/above which the move is "gap_driven".
+    options_progo_gap_share: float = 0.6
+    # In live mode, never relax the gate past this day % no matter the character.
+    options_progo_relax_max_day_pct: float = 5.0
     # Split Gemini prompts into small batches to avoid read timeouts
     llm_ticker_batch_size: int = 3
     # Extra names always considered in the movers universe (comma-separated)
